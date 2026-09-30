@@ -119,7 +119,9 @@ v0.1.1 在每次同步时修正已确认的旧模板，不要求用户编辑 cat
 
 v0.1.1：DeepSeek 新提示词的真实 function call/result 两轮完成（4.025s + 3.348s）；空白 CODEX_HOME 下通过新版入口自动同步、官方 Codex 执行本机 shell 并返回标记，exit 0（9.934s）。3 个定向回归用例覆盖两处 prompt 来源、别名、重复同步和无关模型/能力保留。
 
-本次 Web 验证保留两个运行障碍：旧 Windows 路由返回 tunnel unavailable；既有账号池先成功回答但未返回工具调用，随后指定 function 的请求返回 session_account_unreachable。**本版不宣称 Web 本机工具执行已通过**，不自动切账号、扩大权限或改变路由。底层模型版本、图像、搜索、并行及结构化输出未在本次逐项验收。
+2026-10-01 后续服务恢复：原 Windows Web 后台重新启动，Linux 账号池的卡住页面已恢复。公网原 Web key + 官方 Codex 问答完成（16.61s），账号池同一会话两轮上下文续接完成（17.753s、7.935s）。生产 Provider 现下发 browser-only 提示词并关闭本机 shell/patch 声明，接入工具自动保留这些已修正元数据。
+
+**当前自动 Web 模式明确不支持本机工具，不是提示词可以开启的能力。** 当前桥接版本需要 Full + 手动确认模式及 ChatGPT 工具授权才允许本机工具；接入工具不会替用户改变模式、账号或权限。此前 tunnel unavailable/session_account_unreachable 是已恢复服务的历史故障；底层模型版本、图像、搜索及结构化输出未在本次逐项验收。
 
 v0.1.0 的真实空白配置验收（安装器与平台启动机制在 v0.1.1 未改变）：
 
