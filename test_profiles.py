@@ -1,0 +1,51 @@
+import copy
+import unittest
+
+import codex_provider as connector
+
+
+class LegacyPromptTests(unittest.TestCase):
+    def test_repairs_both_prompt_sources_and_preserves_capabilities(self):
+        legacy = "You are Codex, an agent based on GPT-5. Old instructions."
+        model = {
+            "slug": "chatgpt-web/light",
+            "base_instructions": legacy,
+            "model_messages": {"instructions_template": legacy, "permissions": "keep"},
+            "context_window": 111193,
+            "supports_search_tool": True,
+            "supported_reasoning_levels": [{"effort": "low"}],
+            "visibility": "hide",
+        }
+        catalog = {"models": [model], "extra": "keep"}
+        expected = copy.deepcopy(catalog)
+        expected["models"][0]["base_instructions"] = connector.CHATGPT_WEB_INSTRUCTIONS
+        expected["models"][0]["model_messages"]["instructions_template"] = connector.CHATGPT_WEB_INSTRUCTIONS
+        self.assertEqual(connector.repair_legacy_prompts(catalog), ["chatgpt-web/light"])
+        self.assertEqual(catalog, expected)
+        self.assertEqual(connector.repair_legacy_prompts(catalog), [])
+
+    def test_deepseek_aliases_and_both_legacy_prefixes(self):
+        for slug in ("DeepSeek-V4.1-Flash", "deepseek/deepseek-v4-pro"):
+            for prefix in ("a coding agent", "an agent"):
+                with self.subTest(slug=slug, prefix=prefix):
+                    model = {"slug": slug, "base_instructions": "", "model_messages": {
+                        "instructions_template": "You are Codex, %s based on GPT-5. Old." % prefix}}
+                    connector.repair_legacy_prompts({"models": [model]})
+                    self.assertEqual(model["model_messages"]["instructions_template"],
+                                     connector.DEEPSEEK_INSTRUCTIONS)
+                    self.assertEqual(model["base_instructions"], "")
+
+    def test_other_models_and_corrected_upstream_prompts_win(self):
+        catalog = {"models": [
+            {"slug": "gpt-6-astra", "base_instructions": "You are Codex, an agent based on GPT-5."},
+            {"slug": "DeepSeek-V4.1-Flash", "base_instructions": "Upstream DeepSeek instructions",
+             "model_messages": None},
+            {"slug": "chatgpt-web/pro", "model_messages": {"instructions_template": "New Web prompt"}},
+        ]}
+        before = copy.deepcopy(catalog)
+        self.assertEqual(connector.repair_legacy_prompts(catalog), [])
+        self.assertEqual(catalog, before)
+
+
+if __name__ == "__main__":
+    unittest.main()
