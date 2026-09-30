@@ -9,7 +9,7 @@ param([string]$Url = $env:CODEX_PROVIDER_URL)
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64-bit Windows is required.' }
     if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { throw 'Install official Codex first and make codex available in PATH.' }
 
-    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.1' }
+    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.2' }
     $Base = "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release"
     $Root = Join-Path $env:LOCALAPPDATA 'codex-provider-connect'
     $Bin = Join-Path $env:USERPROFILE '.local\bin'
