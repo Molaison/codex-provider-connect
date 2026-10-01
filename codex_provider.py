@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 
 DEEPSEEK_INSTRUCTIONS = """You are a coding assistant powered by DeepSeek and running in Codex. Do not claim to be GPT or infer capabilities from the client name.
@@ -171,6 +171,42 @@ def read_connection():
         return json.load(stream)
 
 
+def terminal_handles():
+    """Open the controlling terminal for prompting.
+
+    `open("/dev/tty", "r+")` yields a buffered read/write object that seeks on
+    first use, so Python raises `io.UnsupportedOperation: File or stream is not
+    seekable.` on a terminal. Separate read and write handles avoid that.
+    """
+    try:
+        return open("/dev/tty", "r"), open("/dev/tty", "w")
+    except OSError:
+        raise ValueError(
+            "无法打开 /dev/tty：当前没有可用的控制终端（例如 stdin 被管道占用）。"
+            "请用 CODEX_PROVIDER_URL / CODEX_PROVIDER_API_KEY 提供连接信息，"
+            "或安装后单独运行 codex-provider configure。"
+        ) from None
+
+
+def prompt_url():
+    if os.name == "nt":
+        return input("Provider API 地址（含 /v1）：")
+    terminal_in, terminal_out = terminal_handles()
+    with terminal_in, terminal_out:
+        terminal_out.write("Provider API 地址（含 /v1）：")
+        terminal_out.flush()
+        return terminal_in.readline().strip()
+
+
+def prompt_key():
+    # curl | bash consumes stdin; never fall back to echoing a key there.
+    if os.name == "nt":
+        return getpass.getpass("Provider API key（隐藏输入）：")
+    terminal_in, terminal_out = terminal_handles()
+    with terminal_in, terminal_out:
+        return getpass.getpass("Provider API key（隐藏输入）：", stream=terminal_out)
+
+
 def configure(arguments):
     parser = argparse.ArgumentParser(prog="codex-provider configure", description="连接 Provider；密钥隐藏输入，不修改现有 Codex 配置。")
     parser.add_argument("--url", default=os.environ.get("CODEX_PROVIDER_URL"), help="Provider API 根地址（通常以 /v1 结尾）")
@@ -178,22 +214,11 @@ def configure(arguments):
     binary = codex_binary()
     url = args.url
     if not url:
-        if os.name == "nt":
-            url = input("Provider API 地址（含 /v1）：")
-        else:
-            with open("/dev/tty", "r+") as terminal:
-                terminal.write("Provider API 地址（含 /v1）：")
-                terminal.flush()
-                url = terminal.readline().strip()
+        url = prompt_url()
     url = normalize_url(url)
     key = os.environ.get("CODEX_PROVIDER_API_KEY")
     if not key:
-        # curl | bash consumes stdin; never fall back to echoing a key there.
-        if os.name == "nt":
-            key = getpass.getpass("Provider API key（隐藏输入）：")
-        else:
-            with open("/dev/tty", "r+") as terminal:
-                key = getpass.getpass("Provider API key（隐藏输入）：", stream=terminal)
+        key = prompt_key()
     if not key or not key.strip():
         raise ValueError("API key 不能为空。")
     connection = {"url": url, "api_key": key.strip()}

@@ -11,26 +11,26 @@ Linux/macOS/WSL 还需要 Python 3.8+ 和 curl；Windows 安装器自动准备�
 **原生 Windows：在 PowerShell 中执行一条命令。**
 
 ```powershell
-irm https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.2/install.ps1 | iex
+irm https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.ps1 | iex
 ```
 
 地址已知时，可以仍用一条命令，仅交互输入密钥：
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.2/install.ps1'))) -Url 'https://your-provider.example/v1'
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.ps1'))) -Url 'https://your-provider.example/v1'
 ```
 
 **Linux / macOS / WSL：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.2/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.sh | bash
 ```
 
 按提示输入 Provider API 地址（通常以 `/v1` 结尾）和 API key；密钥隐藏输入。
 也可在同一条命令里提供非敏感地址：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.2/install.sh | bash -s -- --url https://your-provider.example/v1
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.sh | bash -s -- --url https://your-provider.example/v1
 ```
 
 这是执行远程安装脚本的命令。入口固定到版本标签；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
@@ -103,7 +103,7 @@ rm -r "${CODEX_HOME:-$HOME/.codex}/provider-connect"
 
 ## 模型提示词与能力边界
 
-v0.1.2 在每次同步时修正已确认的旧模板，不要求用户编辑 catalog：
+v0.1.2 起在每次同步时修正已确认的旧模板，不要求用户编辑 catalog：
 
 | 模型 | 自动调整 | 保留与限制 |
 | --- | --- | --- |
@@ -113,9 +113,17 @@ v0.1.2 在每次同步时修正已确认的旧模板，不要求用户编辑 cat
 DeepSeek 保留编码代理的授权与验证要求；Web 提示词仅要求直接回答、结合对话/附件并如实说明不确定性。当前部署的 Web 后端另有问答转换层，剔除客户端的 Codex 系统/开发者模板、工具定义与执行记录、运行环境和技能注入，仅保留真实问答及附件。
 不会凭模型名称扩大上下文窗口、打开图像、搜索、并行或其他工具能力。目录声明本身不是这些能力的实测证明。
 这属于接入工具的客户端修正：不会修改 Provider 原始响应，也不会更新已经打开的会话。
-升级时重新运行上方 v0.1.2 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
+升级时重新运行上方 v0.1.3 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
 
 ## 发布维护
+
+v0.1.3 修复 `curl | bash` 场景的交互提示：此前询问 Provider 地址和密钥时使用
+`open("/dev/tty", "r+")`，该缓冲读写对象在终端上会触发
+`io.UnsupportedOperation: File or stream is not seekable.`，安装脚本在提示阶段中止。
+现在改用独立的读/写句柄；没有可用控制终端（例如非交互环境）时给出明确提示，
+让用户改用 `CODEX_PROVIDER_URL` / `CODEX_PROVIDER_API_KEY` 或安装后单独运行
+`codex-provider configure`，不再抛底层异常。
+
 
 v0.1.2 将 Web fallback 收敛为简短纯问答指令。服务端已补齐 Windows 缺失的问答转换，并按原生 `content_item_kinds` 清理 AGENTS/环境/技能注入；不会按关键词删除真实提问。Linux、Windows 各两轮真实问答共 4/4 完成，正确保留前轮标记、计算结果及用户引用的 `Codex` / `AGENTS.md`，无本机工具提示或 Full 引导。DeepSeek 编码代理行为不变。
 
@@ -135,6 +143,6 @@ v0.1.0 的真实空白配置验收（安装器与平台启动机制在 v0.1.1 �
 
 两端都在原生 model/list 中显示了 DeepSeek，Windows 同时显示 gpt-6.1-sol。数量来自各次 Provider 返回值，并非固定名单；隐藏条目保留但不强行展示。已验证启动自动刷新、不覆盖现有 Codex 配置，以及错误密钥不覆盖已保存连接。Windows 从 GitHub 安装并实际使用私有 Python 和原生 npm Codex，非 WSL 模拟。macOS 共用 POSIX 入口，尚未实机验收。
 
-版本号同时位于 `install.sh`、`install.ps1` 和 `codex_provider.py`。更新时先修改版本并提交，再运行 `just release 0.1.2`。
+版本号同时位于 `install.sh`、`install.ps1` 和 `codex_provider.py`。更新时先修改版本并提交，再运行 `just release 0.1.3`。
 维护者可用 `CODEX_CONNECT_REF=main` 验收 GitHub 主分支入口；默认用户入口固定在发布标签。
 验收应从空白 HOME/CODEX_HOME 出发，用真实 Provider 和原生 `app-server model/list` 检查菜单，而不只检查下载成功。
