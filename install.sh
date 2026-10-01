@@ -19,7 +19,7 @@ main() {
     fi
     mkdir -p "${HOME}/.local/bin"
     temporary=$(mktemp "${HOME}/.local/bin/.codex-provider.XXXXXX")
-    trap 'rm -f -- "$temporary"' EXIT
+    trap 'rm -f -- "${temporary:-}"' EXIT
     curl --fail --silent --show-error --location --retry 2 "${base}/codex_provider.py" -o "$temporary"
     # 入口脚本自带默认版本；若它指向的载荷不是同一版本，宁可失败也不要静默装旧版。
     if [[ "$release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
