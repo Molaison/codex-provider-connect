@@ -144,5 +144,6 @@ v0.1.0 的真实空白配置验收（安装器与平台启动机制在 v0.1.1 �
 两端都在原生 model/list 中显示了 DeepSeek，Windows 同时显示 gpt-6.1-sol。数量来自各次 Provider 返回值，并非固定名单；隐藏条目保留但不强行展示。已验证启动自动刷新、不覆盖现有 Codex 配置，以及错误密钥不覆盖已保存连接。Windows 从 GitHub 安装并实际使用私有 Python 和原生 npm Codex，非 WSL 模拟。macOS 共用 POSIX 入口，尚未实机验收。
 
 版本号同时位于 `install.sh`、`install.ps1` 和 `codex_provider.py`。更新时先修改版本并提交，再运行 `just release 0.1.3`。
+标签会固化入口脚本自带的默认版本；两个安装器在下载 `codex_provider.py` 后校验该文件里的 `VERSION` 与入口版本一致，不一致就中止而不是静默装成旧版本（`CODEX_CONNECT_REF=main` 时跳过该校验）。
 维护者可用 `CODEX_CONNECT_REF=main` 验收 GitHub 主分支入口；默认用户入口固定在发布标签。
 验收应从空白 HOME/CODEX_HOME 出发，用真实 Provider 和原生 `app-server model/list` 检查菜单，而不只检查下载成功。

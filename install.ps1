@@ -9,7 +9,7 @@ param([string]$Url = $env:CODEX_PROVIDER_URL)
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64-bit Windows is required.' }
     if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { throw 'Install official Codex first and make codex available in PATH.' }
 
-    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.2' }
+    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.3' }
     $Base = "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release"
     $Root = Join-Path $env:LOCALAPPDATA 'codex-provider-connect'
     $Bin = Join-Path $env:USERPROFILE '.local\bin'
@@ -36,6 +36,13 @@ param([string]$Url = $env:CODEX_PROVIDER_URL)
         }
         $Download = Join-Path $Temporary 'codex_provider.py'
         Invoke-WebRequest -UseBasicParsing -Uri "$Base/codex_provider.py" -OutFile $Download
+        # 入口脚本自带默认版本；若它指向的载荷不是同一版本，宁可失败也不要静默装旧版。
+        if ($Release -match '^v\d+\.\d+\.\d+$') {
+            $ExpectedVersion = 'VERSION = "' + $Release.TrimStart('v') + '"'
+            if (-not (Select-String -LiteralPath $Download -SimpleMatch $ExpectedVersion -Quiet)) {
+                throw "Downloaded codex_provider.py does not match $Release; nothing was installed."
+            }
+        }
         Move-Item -Force -LiteralPath $Download -Destination $Helper
         $Lines = @('@echo off', 'rem codex-provider-connect', 'setlocal', 'set "PYTHONUTF8=1"', '"%LOCALAPPDATA%\codex-provider-connect\python\python.exe" "%LOCALAPPDATA%\codex-provider-connect\codex_provider.py" %*', 'exit /b %errorlevel%')
         [IO.File]::WriteAllLines($Launcher, $Lines, [Text.Encoding]::ASCII)
