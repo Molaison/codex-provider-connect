@@ -1,0 +1,11 @@
+--- a/codex-rs/model-provider/src/models_endpoint.rs
++++ b/codex-rs/model-provider/src/models_endpoint.rs
+@@ -44,7 +44,7 @@
+ const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+ const MODELS_ENDPOINT: &str = "/models";
+ // Bound downloads from explicitly configured catalogs before decoding or caching them.
+-const MAX_MODEL_CATALOG_BYTES: usize = 1024 * 1024;
++const MAX_MODEL_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+ 
+ /// Provider-owned OpenAI-compatible `/models` endpoint.
+ #[derive(Debug)]

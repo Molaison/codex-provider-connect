@@ -1,5 +1,12 @@
 import copy
+import json
+import os
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
+
 
 import codex_provider as connector
 
@@ -47,8 +54,6 @@ class LegacyPromptTests(unittest.TestCase):
         self.assertEqual(catalog, before)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class BuiltinMergeTests(unittest.TestCase):
@@ -67,6 +72,46 @@ class BuiltinMergeTests(unittest.TestCase):
         self.assertEqual(connector.merge_builtin(catalog, [{"slug": "gpt-6-astra", "provider": "builtin"}]), [])
         self.assertEqual(catalog["models"], [provider_entry])
         self.assertEqual(len(catalog["models"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ClientOverrideTests(unittest.TestCase):
+    """client install 记录的客户端应优先于 PATH 中的官方 Codex。"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="codex-provider-test-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.env = mock.patch.dict(os.environ, {"CODEX_HOME": self.home})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.addCleanup(os.environ.pop, "CODEX_BINARY", None)
+
+    def install_record(self, path):
+        state = Path(self.home) / "provider-connect"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "client.json").write_text(json.dumps({"path": str(path)}), encoding="utf-8")
+
+    def test_recorded_client_wins_over_path(self):
+        fake = Path(self.home) / "patched-codex"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        self.install_record(fake)
+        self.assertEqual(connector.codex_binary(), [str(fake)])
+
+    def test_missing_client_falls_back_to_path(self):
+        self.install_record(Path(self.home) / "gone")
+        self.assertIsNone(connector.installed_client())
+
+    def test_codx_binary_env_still_wins(self):
+        fake = Path(self.home) / "patched-codex"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        self.install_record(fake)
+        os.environ["CODEX_BINARY"] = str(fake)
+        self.assertEqual(connector.codex_binary(), [str(fake)])
 
 
 if __name__ == "__main__":

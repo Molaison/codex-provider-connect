@@ -33,7 +33,31 @@ curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.
 curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- --url https://your-provider.example/v1
 ```
 
-这是执行远程安装脚本的命令。入口固定到版本标签；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
+这是执行远程安装脚本的命令。入口固定到版本标签（`CODEX_CONNECT_REF` 可换版本，`CODEX_CONNECT_BASE` 可换镜像）；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
+
+### 可选：同时安装移除目录上限的补丁客户端
+
+官方 Codex 读取显式配置的目录（`model_catalog_url`）时限制 1 MiB，上游目录约 1.7 MiB，
+超过会静默丢弃整个目录。需要这条路径时，把预编译的补丁客户端一起装上：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- \
+  --url https://your-provider.example/v1 \
+  --client <客户端 URL 或本地路径> \
+  --client-sha256 <64 位校验和>
+```
+
+也可以安装后单独管理：
+
+```bash
+codex-provider client install <URL 或路径> --sha256 <校验和>   # 安装并启用
+codex-provider client status                                  # 查看当前使用的客户端
+codex-provider client remove                                  # 回到官方 Codex
+```
+
+补丁只影响 `model_catalog_url` 这条路径；通过本工具启动时用的是 `model_catalog_json`
+本地文件，本来就不受 1 MiB 限制。官方 Codex 安装不被修改，补丁客户端单独存放，
+`client remove` 随时回退。源码补丁与实测数据见 `patches/README.md`。
 
 ## 使用
 
@@ -124,6 +148,12 @@ v0.1.4 修复目录只写 Provider 结果导致的模型缺失。`model_catalog_
 `Model metadata ... not found`。现在同步时会用一个不可达 base_url 的临时 CODEX_HOME 读出内置目录，
 按 slug 合并（Provider 条目优先），并在日志中分别报告 Provider、内置与可见条目数。
 实测：Provider 19 条 + 内置 11 条 = 30 条，17 条 API 可见；空白客户端安装后内置模型与 Provider 模型同时可用。
+
+同一版本新增可选的补丁客户端安装：`install.sh --client <URL|路径> --client-sha256 <校验和>`
+或安装后运行 `codex-provider client install`，把 `model_catalog_url` 的 1 MiB 上限提到 8 MiB。
+A/B 实测（同一上游 1.70 MiB 目录）：官方 0.160.0 得到 0 条模型，补丁客户端得到 29 条、17 条可见；
+9 MiB 目录两者都拒绝，说明新上限真实生效。远程安装强制校验 SHA256，官方 Codex 不被改写，
+`codex-provider client remove` 回到官方客户端。
 
 v0.1.3 修复 `curl | bash` 场景的交互提示：此前询问 Provider 地址和密钥时使用
 `open("/dev/tty", "r+")`，该缓冲读写对象在终端上会触发

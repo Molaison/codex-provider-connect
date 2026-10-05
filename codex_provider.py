@@ -4,6 +4,7 @@
 import argparse
 import csv
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -90,8 +91,36 @@ def private_json(path, value):
             os.unlink(name)
 
 
+def client_record_path():
+    return state_directory() / "client.json"
+
+
+def installed_client():
+    """`codex-provider client install` 安装的客户端; 未安装或不可执行时返回 None。"""
+    record_path = client_record_path()
+    if not record_path.exists():
+        return None
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    binary = record.get("path")
+    if isinstance(binary, str) and os.path.isfile(binary) and os.access(binary, os.X_OK):
+        return binary
+    return None
+
+
 def codex_binary():
-    binary = shutil.which(os.environ.get("CODEX_BINARY", "codex"))
+    override = os.environ.get("CODEX_BINARY")
+    if override:
+        binary = shutil.which(override)
+        if not binary:
+            raise ValueError("CODEX_BINARY 指向的客户端不存在：%s" % override)
+        return [binary]
+    installed = installed_client()
+    if installed:
+        return [installed]
+    binary = shutil.which("codex")
     if not binary:
         raise ValueError("请先安装官方 Codex，并确保 codex 在 PATH 中。")
     if os.name == "nt" and Path(binary).suffix.lower() in (".cmd", ".bat"):
@@ -284,6 +313,107 @@ def configure(arguments):
     print("接入完成。使用 codex-provider 启动；每次启动前自动刷新目录。", file=sys.stderr)
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _download(url, target):
+    request = urllib.request.Request(url, headers={"User-Agent": "codex-provider-connect/" + VERSION})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as stream:
+                shutil.copyfileobj(response, stream, 1024 * 1024)
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            if attempt == 2:
+                raise ValueError("客户端下载失败（三次有界尝试）：%s" % url) from None
+            time.sleep(attempt + 1)
+
+
+def install_client(arguments):
+    parser = argparse.ArgumentParser(prog="codex-provider client install",
+                                     description="安装用于启动的客户端（例如移除 1 MiB 目录上限的补丁版 Codex）。")
+    parser.add_argument("source", help="预编译客户端的 http(s) URL 或本地路径")
+    parser.add_argument("--sha256", default=None, help="预期的 SHA256；下载远程文件时必须提供")
+    parser.add_argument("--force", action="store_true", help="已有记录时仍覆盖")
+    args = parser.parse_args(arguments)
+
+    record_path = client_record_path()
+    if record_path.exists() and not args.force:
+        raise ValueError("已安装客户端；如需替换请加 --force（client remove 可回到官方客户端）。")
+    source = args.source
+    is_remote = source.startswith(("http://", "https://"))
+    if is_remote and not args.sha256:
+        raise ValueError("远程安装必须提供 --sha256，否则无法确认下载内容。")
+
+    target_dir = state_directory() / "client"
+    secure_directory(target_dir)
+    target = target_dir / "codex"
+    pending = target_dir / ".pending-client"
+    if is_remote:
+        _download(source, pending)
+    else:
+        local = Path(source).expanduser()
+        if not local.is_file():
+            raise ValueError("本地客户端不存在：%s" % source)
+        shutil.copyfile(local, pending)
+    os.chmod(pending, 0o755)
+
+    digest = _sha256_file(pending)
+    if args.sha256 and digest.lower() != args.sha256.strip().lower():
+        pending.unlink()
+        raise ValueError("SHA256 不匹配：期望 %s，实际 %s" % (args.sha256.strip().lower(), digest))
+    os.replace(pending, target)
+
+    try:
+        version = subprocess.run([str(target), "--version"], check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("下载的客户端无法执行 --version；已保留文件但不启用：%s" % target) from None
+    private_json(record_path, {"path": str(target), "sha256": digest, "source": source, "version": version})
+    print("已安装客户端：%s（%s）" % (target, version), file=sys.stderr)
+    print("codex-provider 现在固定使用它；官方 Codex 未被修改。", file=sys.stderr)
+
+
+def remove_client(arguments):
+    parser = argparse.ArgumentParser(prog="codex-provider client remove", description="删除已安装的客户端，回到官方 Codex。")
+    parser.parse_args(arguments)
+    record_path = client_record_path()
+    binary = installed_client()
+    if binary:
+        try:
+            os.unlink(binary)
+        except OSError:
+            pass
+    if record_path.exists():
+        record_path.unlink()
+    print("已移除客户端覆盖，codex-provider 回到 PATH 中的官方 Codex。", file=sys.stderr)
+
+
+def client(arguments):
+    if not arguments or arguments[0] in ("status", "--help", "-h"):
+        binary = installed_client()
+        record_path = client_record_path()
+        if binary:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            print("使用中的客户端：%s\n  sha256=%s\n  来源=%s\n  版本=%s"
+                  % (binary, record.get("sha256", "?"), record.get("source", "?"), record.get("version", "?")))
+        else:
+            official = shutil.which("codex")
+            print("未安装客户端覆盖；使用 PATH 中的官方 Codex：%s" % (official or "未找到"))
+        return
+    if arguments[0] == "install":
+        install_client(arguments[1:])
+        return
+    if arguments[0] == "remove":
+        remove_client(arguments[1:])
+        return
+    raise ValueError("client 支持 status / install / remove。")
+
+
 def main():
     arguments = sys.argv[1:]
     if arguments == ["--version"]:
@@ -294,18 +424,24 @@ def main():
 
   codex-provider configure [--url URL]   配置连接并同步模型
   codex-provider sync                    仅刷新目录
+  codex-provider client status           查看当前使用的客户端
+  codex-provider client install SRC      安装补丁客户端(移除 1 MiB 目录上限), 需 --sha256
+  codex-provider client remove           回到官方 Codex
   codex-provider [Codex 参数...]         刷新目录，然后启动官方 Codex
   codex-provider -- [Codex 参数...]      原样转发参数（例如 -- --help）
 
 依赖：官方 Codex、Python 3.8+。Linux/macOS/WSL/Windows。
 配置及密钥：$CODEX_HOME/provider-connect（默认 ~/.codex/provider-connect）。
-现有 config.toml、auth.json、models_cache.json 不会被改写。
+现有 config.toml、auth.json、models_cache.json 不会被改写。\nclient install 只新增独立客户端，不改官方 Codex 安装。
 自动化：CODEX_PROVIDER_API_KEY、CODEX_PROVIDER_URL；可用 CODEX_BINARY 指定官方二进制。
 目录刷新失败会明确退出，不会悄悄使用旧目录继续运行。
 """)
         return
     if arguments and arguments[0] == "configure":
         configure(arguments[1:])
+        return
+    if arguments and arguments[0] == "client":
+        client(arguments[1:])
         return
     if arguments and arguments[0] == "sync" and len(arguments) != 1:
         raise ValueError("sync 不接受额外参数。")
