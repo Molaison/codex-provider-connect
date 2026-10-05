@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 
 DEEPSEEK_INSTRUCTIONS = """You are a coding assistant powered by DeepSeek and running in Codex. Do not claim to be GPT or infer capabilities from the client name.
@@ -127,6 +127,57 @@ def normalize_url(value):
     return value
 
 
+def builtin_catalog(binary):
+    """Codex 自带的内置模型目录。
+
+    `model_catalog_json` 是整体替换而非合并，只写 Provider 目录会让 Codex 内置模型
+    (gpt-6-astra 等) 丢失元数据。这里用一个不可达 base_url 的临时 CODEX_HOME 让 Codex
+    只吐内置目录，不产生任何网络请求。
+    """
+    with tempfile.TemporaryDirectory(prefix="codex-provider-builtin-") as home:
+        config = Path(home) / "config.toml"
+        config.write_text(
+            'model_provider = "builtin_probe"\n'
+            'model = "gpt-6-astra"\n\n'
+            '[model_providers.builtin_probe]\n'
+            'name = "builtin_probe"\n'
+            'wire_api = "responses"\n'
+            'requires_openai_auth = false\n'
+            'base_url = "http://127.0.0.1:9/v1"\n',
+            encoding="utf-8",
+        )
+        environment = dict(os.environ, CODEX_HOME=home)
+        environment.pop("CODEX_PROVIDER_API_KEY", None)
+        try:
+            result = subprocess.run(binary + ["debug", "models"], capture_output=True,
+                                    text=True, env=environment, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            return []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('{"models"'):
+            try:
+                models = json.loads(stripped).get("models")
+            except ValueError:
+                return []
+            if isinstance(models, list):
+                return [m for m in models if isinstance(m, dict) and isinstance(m.get("slug"), str) and m["slug"]]
+    return []
+
+
+def merge_builtin(catalog, extras):
+    """Provider 目录优先; 只补上 Provider 没给的 Codex 内置条目。"""
+    seen = {model["slug"] for model in catalog["models"]}
+    added = []
+    for model in extras:
+        if model["slug"] in seen:
+            continue
+        seen.add(model["slug"])
+        catalog["models"].append(model)
+        added.append(model["slug"])
+    return added
+
+
 def fetch_catalog(connection, binary):
     version = client_version(binary)
     query = urllib.parse.urlencode({"client_version": version})
@@ -155,11 +206,16 @@ def fetch_catalog(connection, binary):
         raise ValueError("Provider models 目录中存在无效模型条目。")
     # Preserve routing, capability metadata, context limits, and visibility.
     repaired = repair_legacy_prompts(catalog)
+    provider_count = len(catalog["models"])
+    added = merge_builtin(catalog, builtin_catalog(binary))
     private_json(state_directory() / "models.json", catalog)
     if repaired:
         print("已修正 %s 个 DeepSeek / ChatGPT Web 的旧 GPT-5 提示词；能力与路由保持 Provider 原值。" % len(repaired), file=sys.stderr)
-    visible = sum(model.get("visibility") == "list" and model.get("supported_in_api", True) for model in models)
-    print("已同步 Provider 目录：%s 个条目，%s 个 API 可见模型。" % (len(models), visible), file=sys.stderr)
+    if added:
+        print("已补入 %s 个 Codex 内置模型：%s" % (len(added), ", ".join(added)), file=sys.stderr)
+    visible = sum(model.get("visibility") == "list" and model.get("supported_in_api", True) for model in catalog["models"])
+    print("已同步目录：Provider %s 个 + 内置 %s 个 = %s 个条目，%s 个 API 可见模型。"
+          % (provider_count, len(added), len(catalog["models"]), visible), file=sys.stderr)
     return state_directory() / "models.json"
 
 

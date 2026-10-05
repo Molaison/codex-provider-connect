@@ -3,7 +3,7 @@
 set -euo pipefail
 
 main() {
-    local release="${CODEX_CONNECT_REF:-v0.1.3}"
+    local release="${CODEX_CONNECT_REF:-v0.1.4}"
     local base="https://raw.githubusercontent.com/Molaison/codex-provider-connect/${release}"
     local destination="${HOME}/.local/bin/codex-provider"
     local temporary

@@ -11,26 +11,26 @@ Linux/macOS/WSL 还需要 Python 3.8+ 和 curl；Windows 安装器自动准备�
 **原生 Windows：在 PowerShell 中执行一条命令。**
 
 ```powershell
-irm https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.ps1 | iex
 ```
 
 地址已知时，可以仍用一条命令，仅交互输入密钥：
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.ps1'))) -Url 'https://your-provider.example/v1'
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.ps1'))) -Url 'https://your-provider.example/v1'
 ```
 
 **Linux / macOS / WSL：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash
 ```
 
 按提示输入 Provider API 地址（通常以 `/v1` 结尾）和 API key；密钥隐藏输入。
 也可在同一条命令里提供非敏感地址：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.3/install.sh | bash -s -- --url https://your-provider.example/v1
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- --url https://your-provider.example/v1
 ```
 
 这是执行远程安装脚本的命令。入口固定到版本标签；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
@@ -113,9 +113,17 @@ v0.1.2 起在每次同步时修正已确认的旧模板，不要求用户编辑 
 DeepSeek 保留编码代理的授权与验证要求；Web 提示词仅要求直接回答、结合对话/附件并如实说明不确定性。当前部署的 Web 后端另有问答转换层，剔除客户端的 Codex 系统/开发者模板、工具定义与执行记录、运行环境和技能注入，仅保留真实问答及附件。
 不会凭模型名称扩大上下文窗口、打开图像、搜索、并行或其他工具能力。目录声明本身不是这些能力的实测证明。
 这属于接入工具的客户端修正：不会修改 Provider 原始响应，也不会更新已经打开的会话。
-升级时重新运行上方 v0.1.3 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
+升级时重新运行上方 v0.1.4 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
 
 ## 发布维护
+
+v0.1.4 修复目录只写 Provider 结果导致的模型缺失。`model_catalog_json` 是整体替换而非合并，
+此前只写 Provider 目录会让 Codex 内置模型（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`、
+`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-daybreak-*-latest`、`gpt-5.5`、`codex-auto-review`）
+从选择器和元数据中消失；若 `config.toml` 里指定了这些模型，Codex 会退回 fallback 元数据并告警
+`Model metadata ... not found`。现在同步时会用一个不可达 base_url 的临时 CODEX_HOME 读出内置目录，
+按 slug 合并（Provider 条目优先），并在日志中分别报告 Provider、内置与可见条目数。
+实测：Provider 19 条 + 内置 11 条 = 30 条，17 条 API 可见；空白客户端安装后内置模型与 Provider 模型同时可用。
 
 v0.1.3 修复 `curl | bash` 场景的交互提示：此前询问 Provider 地址和密钥时使用
 `open("/dev/tty", "r+")`，该缓冲读写对象在终端上会触发

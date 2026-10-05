@@ -49,3 +49,25 @@ class LegacyPromptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuiltinMergeTests(unittest.TestCase):
+    """model_catalog_json 是整体替换: 只写 Provider 目录会让内置模型(如 gpt-6-astra)丢失元数据。"""
+
+    def test_appends_builtins_missing_from_provider(self):
+        catalog = {"models": [{"slug": "deepseek/deepseek-v4.1-flash"}]}
+        added = connector.merge_builtin(catalog, [{"slug": "gpt-6-astra"}, {"slug": "gpt-6.1-sol"}])
+        self.assertEqual(added, ["gpt-6-astra", "gpt-6.1-sol"])
+        self.assertEqual([m["slug"] for m in catalog["models"]],
+                         ["deepseek/deepseek-v4.1-flash", "gpt-6-astra", "gpt-6.1-sol"])
+
+    def test_provider_entry_wins_on_conflict(self):
+        provider_entry = {"slug": "gpt-6-astra", "provider": "upstream"}
+        catalog = {"models": [provider_entry]}
+        self.assertEqual(connector.merge_builtin(catalog, [{"slug": "gpt-6-astra", "provider": "builtin"}]), [])
+        self.assertEqual(catalog["models"], [provider_entry])
+        self.assertEqual(len(catalog["models"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
