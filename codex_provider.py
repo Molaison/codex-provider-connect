@@ -31,6 +31,25 @@ CHATGPT_WEB_INSTRUCTIONS = """You are a helpful question-answering assistant. An
 """
 
 
+# 这四段文案占目录一半体积（约 800 KB），都是客户端可选的 model_messages 字段，
+# 缺失时按内置默认行为走。Provider 目录不再下发，减少每次同步和启动的载荷。
+TRIMMED_MODEL_MESSAGE_KEYS = ("confirmation_policies", "persistent_instructions",
+                              "token_budget", "guardian_v2")
+
+
+def trim_model_messages(catalog):
+    """删除用不到的 model_messages 大块文案；返回 {字段: 字节数}。"""
+    removed = {}
+    for model in catalog["models"]:
+        messages = model.get("model_messages")
+        if not isinstance(messages, dict):
+            continue
+        for key in TRIMMED_MODEL_MESSAGE_KEYS:
+            if key in messages:
+                removed[key] = removed.get(key, 0) + len(json.dumps(messages.pop(key)))
+    return removed
+
+
 def repair_legacy_prompts(catalog):
     """Replace known GPT-5 fallback prompts, not provider-specific capabilities."""
     repaired = []
@@ -237,11 +256,15 @@ def fetch_catalog(connection, binary):
     repaired = repair_legacy_prompts(catalog)
     provider_count = len(catalog["models"])
     added = merge_builtin(catalog, builtin_catalog(binary))
+    trimmed = trim_model_messages(catalog)
     private_json(state_directory() / "models.json", catalog)
     if repaired:
         print("已修正 %s 个 DeepSeek / ChatGPT Web 的旧 GPT-5 提示词；能力与路由保持 Provider 原值。" % len(repaired), file=sys.stderr)
     if added:
         print("已补入 %s 个 Codex 内置模型：%s" % (len(added), ", ".join(added)), file=sys.stderr)
+    if trimmed:
+        print("已丢弃目录里用不到的 model_messages 文案：%s（共 %.0f KB）"
+              % ("、".join(sorted(trimmed)), sum(trimmed.values()) / 1024.0), file=sys.stderr)
     visible = sum(model.get("visibility") == "list" and model.get("supported_in_api", True) for model in catalog["models"])
     print("已同步目录：Provider %s 个 + 内置 %s 个 = %s 个条目，%s 个 API 可见模型。"
           % (provider_count, len(added), len(catalog["models"]), visible), file=sys.stderr)
@@ -393,6 +416,102 @@ def remove_client(arguments):
     print("已移除客户端覆盖，codex-provider 回到 PATH 中的官方 Codex。", file=sys.stderr)
 
 
+# 官方客户端把显式目录(model_catalog_url)限制在 1 MiB，超过就整份丢弃且不报错。
+# 下面这段签名是 `MAX_MODEL_CATALOG_BYTES` 在机器码里的形状；在三个独立构建
+# (官方 0.160.0 stripped、8 MiB 重编译版、collab-plaintext 调试版)里逐字节一致。
+CATALOG_LIMIT_SIGNATURE_PRE = bytes.fromhex(
+    "6804000048898b480600004c89bb50060000488dabc01a0000c683c01a000000")
+CATALOG_LIMIT_SIGNATURE_OPCODE = bytes.fromhex("b9")
+CATALOG_LIMIT_SIGNATURE_POST = bytes.fromhex(
+    "488d935806000048899424500100004889835806000048898b600600000f1083")
+CATALOG_LIMIT_IMMEDIATE = 1024 * 1024
+CATALOG_LIMIT_PATCHED = 8 * 1024 * 1024
+EXECUTABLE_MAGICS = (bytes.fromhex("7f454c46"), bytes.fromhex("cffaedfe"),
+                     bytes.fromhex("cafebabe"), bytes.fromhex("feedface"))
+
+
+def catalog_limit_sites(data, with_context=True):
+    """定位目录上限立即数；返回 [(立即数偏移, 当前值)]。"""
+    prefix = (CATALOG_LIMIT_SIGNATURE_PRE if with_context else b"") + CATALOG_LIMIT_SIGNATURE_OPCODE
+    length = len(data)
+    sites = []
+    start = 0
+    while True:
+        found = data.find(prefix, start)
+        if found < 0:
+            return sites
+        start = found + 1
+        position = found + len(prefix)
+        if position + 4 > length:
+            continue
+        if with_context:
+            tail = bytes(data[position + 4:position + 4 + len(CATALOG_LIMIT_SIGNATURE_POST)])
+            if tail != CATALOG_LIMIT_SIGNATURE_POST:
+                continue
+        sites.append((position, int.from_bytes(bytes(data[position:position + 4]), "little")))
+
+
+def patch_catalog_limit_bytes(data):
+    """把客户端二进制里的 1 MiB 目录上限立即数改成 8 MiB；返回 (新内容, 说明)。"""
+    sites = catalog_limit_sites(bytearray(data), with_context=True)
+    if len(sites) != 1:
+        raise ValueError(
+            "找不到唯一的目录上限签名（匹配 %d 处）；这个客户端版本没有经过验证，拒绝盲改。"
+            "可改用 codex-provider client install 安装已验证的客户端。" % len(sites))
+    position, immediate = sites[0]
+    if immediate == CATALOG_LIMIT_PATCHED:
+        return bytes(data), "已是 8 MiB 上限（未重复改动）"
+    if immediate != CATALOG_LIMIT_IMMEDIATE:
+        raise ValueError("目录上限立即数是 %d，不是预期中的 %d；拒绝盲改。"
+                         % (immediate, CATALOG_LIMIT_IMMEDIATE))
+    patched = bytearray(data)
+    patched[position:position + 4] = CATALOG_LIMIT_PATCHED.to_bytes(4, "little")
+    return bytes(patched), "目录上限 1 MiB -> 8 MiB（偏移 0x%x）" % position
+
+
+def patch_client(arguments):
+    parser = argparse.ArgumentParser(
+        prog="codex-provider client patch",
+        description="复制官方 Codex 并直接替换目录上限立即数(1 MiB -> 8 MiB)；不改动原文件。")
+    parser.add_argument("--source", default=None, help="官方 codex 二进制路径；默认取 PATH 中的 codex")
+    parser.add_argument("--force", action="store_true", help="已有记录时仍覆盖")
+    args = parser.parse_args(arguments)
+
+    record_path = client_record_path()
+    if record_path.exists() and not args.force:
+        raise ValueError("已安装客户端；如需替换请加 --force（client remove 可回到官方客户端）。")
+    source = args.source or shutil.which("codex")
+    if not source:
+        raise ValueError("PATH 中找不到 codex；请用 --source 指定官方客户端路径。")
+    source_path = Path(source).expanduser().resolve()
+    if not source_path.is_file():
+        raise ValueError("官方客户端不存在：%s" % source_path)
+    original = source_path.read_bytes()
+    if original[:4] not in EXECUTABLE_MAGICS:
+        raise ValueError("这是脚本而不是原生二进制客户端（npm 安装的 codex 是 JS 包装）：%s" % source_path)
+    patched, note = patch_catalog_limit_bytes(original)
+
+    target_dir = state_directory() / "client"
+    secure_directory(target_dir)
+    target = target_dir / "codex"
+    pending = target_dir / ".pending-client"
+    pending.write_bytes(patched)
+    os.chmod(pending, 0o755)
+    try:
+        version = subprocess.run([str(pending), "--version"], check=True, capture_output=True,
+                                 text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pending.unlink()
+        raise ValueError("补丁后的客户端无法执行 --version；已放弃，未启用。") from None
+    os.replace(pending, target)
+    private_json(record_path, {"path": str(target), "sha256": _sha256_file(target),
+                               "source": str(source_path),
+                               "source_sha256": _sha256_file(source_path),
+                               "version": version, "patch": note})
+    print("已安装补丁客户端：%s（%s）" % (target, version), file=sys.stderr)
+    print("%s；官方 Codex 原文件未改动。" % note, file=sys.stderr)
+
+
 def client(arguments):
     if not arguments or arguments[0] in ("status", "--help", "-h"):
         binary = installed_client()
@@ -408,10 +527,13 @@ def client(arguments):
     if arguments[0] == "install":
         install_client(arguments[1:])
         return
+    if arguments[0] == "patch":
+        patch_client(arguments[1:])
+        return
     if arguments[0] == "remove":
         remove_client(arguments[1:])
         return
-    raise ValueError("client 支持 status / install / remove。")
+    raise ValueError("client 支持 status / install / patch / remove。")
 
 
 def main():
@@ -425,7 +547,8 @@ def main():
   codex-provider configure [--url URL]   配置连接并同步模型
   codex-provider sync                    仅刷新目录
   codex-provider client status           查看当前使用的客户端
-  codex-provider client install SRC      安装补丁客户端(移除 1 MiB 目录上限), 需 --sha256
+  codex-provider client install SRC      安装预编译的补丁客户端, 需 --sha256
+  codex-provider client patch            复制官方 Codex 并直接改 1 MiB 目录上限为 8 MiB
   codex-provider client remove           回到官方 Codex
   codex-provider [Codex 参数...]         刷新目录，然后启动官方 Codex
   codex-provider -- [Codex 参数...]      原样转发参数（例如 -- --help）

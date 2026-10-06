@@ -2,8 +2,9 @@
 # codex-provider-connect: install the pinned launcher, then configure its connection.
 #
 # 可选参数（其余参数原样传给 codex-provider configure）：
-#   --client <URL 或路径>       同时安装补丁客户端（例如移除 1 MiB 目录上限的 Codex）
+#   --client <URL 或路径>       安装预编译的补丁客户端（例如移除 1 MiB 目录上限的 Codex）
 #   --client-sha256 <校验和>    远程 --client 必填
+#   --patch-catalog-limit     复制官方 codex 并直接替换目录上限立即数(1 MiB -> 8 MiB)
 # 环境变量：CODEX_CONNECT_REF(默认 v0.1.4) CODEX_CONNECT_BASE(默认 GitHub raw 地址)
 set -euo pipefail
 
@@ -12,7 +13,7 @@ main() {
     local base="${CODEX_CONNECT_BASE:-https://raw.githubusercontent.com/Molaison/codex-provider-connect/${release}}"
     local destination="${HOME}/.local/bin/codex-provider"
     local temporary
-    local client_source="" client_sha256=""
+    local client_source="" client_sha256="" patch_limit=""
     local -a passthrough=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -24,6 +25,9 @@ main() {
                 client_sha256="${2:-}"
                 [[ -n "$client_sha256" ]] || { printf '--client-sha256 需要一个校验和。\n' >&2; return 1; }
                 shift 2 ;;
+            --patch-catalog-limit)
+                patch_limit=1
+                shift ;;
             *)
                 passthrough+=("$1")
                 shift ;;
@@ -53,12 +57,19 @@ main() {
     mv -f -- "$temporary" "$destination"
     trap - EXIT
     # 可选: 安装补丁客户端(移除 1 MiB 目录上限), 官方 Codex 不改动。
+    if [[ -n "$client_source" && -n "$patch_limit" ]]; then
+        printf '--client 与 --patch-catalog-limit 只能选一个。\n' >&2
+        return 1
+    fi
     if [[ -n "$client_source" ]]; then
         if [[ -n "$client_sha256" ]]; then
             "$destination" client install "$client_source" --sha256 "$client_sha256" --force
         else
             "$destination" client install "$client_source" --force
         fi
+    elif [[ -n "$patch_limit" ]]; then
+        # 直接对现成的官方 codex 做一次定点字节替换, 不下载任何大文件。
+        "$destination" client patch --source "$(command -v codex)" --force
     fi
     "$destination" configure ${passthrough[@]+"${passthrough[@]}"}
     printf '\n启动命令：%s\n' "$destination"

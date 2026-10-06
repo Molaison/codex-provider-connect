@@ -35,29 +35,37 @@ curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.
 
 这是执行远程安装脚本的命令。入口固定到版本标签（`CODEX_CONNECT_REF` 可换版本，`CODEX_CONNECT_BASE` 可换镜像）；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
 
-### 可选：同时安装移除目录上限的补丁客户端
+### 可选：解除官方客户端的 1 MiB 目录上限
 
 官方 Codex 读取显式配置的目录（`model_catalog_url`）时限制 1 MiB，上游目录约 1.7 MiB，
-超过会静默丢弃整个目录。需要这条路径时，把预编译的补丁客户端一起装上：
+超过会静默丢弃整个目录。加一个参数即可在安装时解除，不下载任何大文件：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- \
   --url https://your-provider.example/v1 \
-  --client <客户端 URL 或本地路径> \
-  --client-sha256 <64 位校验和>
+  --patch-catalog-limit
 ```
 
-也可以安装后单独管理：
+`--patch-catalog-limit` 做的事只有一步：把现成的官方 `codex` 复制一份，按已验证的机器码
+签名定位那个 `1 MiB` 立即数并改成 `8 MiB`，再用 `codex --version` 确认副本可执行。
+原文件不动；签名不唯一或对不上的客户端版本会明确失败，不会盲改。
+
+安装后单独管理：
 
 ```bash
-codex-provider client install <URL 或路径> --sha256 <校验和>   # 安装并启用
-codex-provider client status                                  # 查看当前使用的客户端
-codex-provider client remove                                  # 回到官方 Codex
+codex-provider client patch                                    # 就地打补丁并启用
+codex-provider client install <URL 或路径> --sha256 <校验和>   # 改用预编译补丁客户端
+codex-provider client status                                   # 查看当前使用的客户端
+codex-provider client remove                                   # 回到官方 Codex
 ```
+
+实测的目录上限：补丁前 0.95 MiB 通过、1.5 MiB 起丢弃；补丁后 7.9 MiB 通过、
+8.5 MiB 起丢弃（同一个本地代理、同一份载荷，只换客户端）。签名偏移与复现步骤见
+`patches/README.md`。
 
 补丁只影响 `model_catalog_url` 这条路径；通过本工具启动时用的是 `model_catalog_json`
 本地文件，本来就不受 1 MiB 限制。官方 Codex 安装不被修改，补丁客户端单独存放，
-`client remove` 随时回退。源码补丁与实测数据见 `patches/README.md`。
+`client remove` 随时回退。
 
 ## 使用
 
@@ -139,9 +147,18 @@ DeepSeek 保留编码代理的授权与验证要求；Web 提示词仅要求直�
 这属于接入工具的客户端修正：不会修改 Provider 原始响应，也不会更新已经打开的会话。
 升级时重新运行上方 v0.1.4 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
 
+同步时还会丢掉 `model_messages` 里四段用不到的文案：`confirmation_policies`、
+`persistent_instructions`、`token_budget`、`guardian_v2`。它们占目录一半体积（实测约 790 KB），
+缺失时客户端走内置默认行为。当前上游目录经此精简后为 1,035,777 字节（0.99 MiB），
+已在 1 MiB 以下；HTTP 响应本身仍由 Provider 决定，所以 `model_catalog_url` 路径是否还需要补丁，
+取决于 Provider 下发的原始体积。
+
 ## 发布维护
 
-v0.1.4 修复目录只写 Provider 结果导致的模型缺失。`model_catalog_json` 是整体替换而非合并，
+v0.1.4 增加 `--patch-catalog-limit`：安装时对现成的官方 `codex` 做一次定点字节替换，
+把目录上限从 1 MiB 提到 8 MiB，并保留 `client install` 作为预编译客户端的备选。同版本还会在同步时
+丢掉四段用不到的 `model_messages` 文案（约 790 KB），实测精简后的目录降到 0.99 MiB。
+v0.1.4 同时修复目录只写 Provider 结果导致的模型缺失。`model_catalog_json` 是整体替换而非合并，
 此前只写 Provider 目录会让 Codex 内置模型（`gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`、
 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-daybreak-*-latest`、`gpt-5.5`、`codex-auto-review`）
 从选择器和元数据中消失；若 `config.toml` 里指定了这些模型，Codex 会退回 fallback 元数据并告警

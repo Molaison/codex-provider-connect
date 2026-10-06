@@ -78,6 +78,60 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class CatalogTrimTests(unittest.TestCase):
+    """目录里那四段大块文案不下发；其余字段原样保留。"""
+
+    def test_drops_four_optional_blocks_and_keeps_the_rest(self):
+        model = {"slug": "gpt-6-astra", "model_messages": {
+            "instructions_template": "keep", "permissions": None, "approvals": {"never": None},
+            "confirmation_policies": {"browser_use": "x" * 10},
+            "persistent_instructions": "y" * 10, "token_budget": {"enabled": False},
+            "guardian_v2": {"classifier_instructions": "z" * 10}}}
+        catalog = {"models": [model, {"slug": "deepseek/deepseek-v4.1-flash"}]}
+        removed = connector.trim_model_messages(catalog)
+        self.assertEqual(sorted(removed), ["confirmation_policies", "guardian_v2",
+                                           "persistent_instructions", "token_budget"])
+        self.assertTrue(all(size > 0 for size in removed.values()))
+        self.assertEqual(sorted(model["model_messages"]),
+                         ["approvals", "instructions_template", "permissions"])
+        self.assertEqual(connector.trim_model_messages(catalog), {})
+        self.assertEqual(model["model_messages"]["instructions_template"], "keep")
+
+
+class CatalogLimitPatchTests(unittest.TestCase):
+    """安装时对现成二进制做定点替换，而不是下载预编译客户端。"""
+
+    @staticmethod
+    def binary(immediate, sites=1):
+        head = connector.CATALOG_LIMIT_SIGNATURE_PRE + connector.CATALOG_LIMIT_SIGNATURE_OPCODE
+        tail = connector.CATALOG_LIMIT_SIGNATURE_POST
+        return b"\x7fELF" + b"\x00" * 60 + (
+            head + immediate.to_bytes(4, "little") + tail + b"\x90" * 20) * sites
+
+    def test_rewrites_one_mebibyte_limit_to_eight(self):
+        signed = self.binary(connector.CATALOG_LIMIT_IMMEDIATE)
+        patched, note = connector.patch_catalog_limit_bytes(signed)
+        self.assertEqual(len(patched), len(signed))
+        self.assertIn("1 MiB -> 8 MiB", note)
+        self.assertEqual([value for _, value in connector.catalog_limit_sites(patched)],
+                         [connector.CATALOG_LIMIT_PATCHED])
+
+    def test_already_patched_stays_unchanged(self):
+        signed = self.binary(connector.CATALOG_LIMIT_PATCHED)
+        patched, note = connector.patch_catalog_limit_bytes(signed)
+        self.assertEqual(patched, signed)
+        self.assertIn("已是 8 MiB", note)
+
+    def test_refuses_unknown_and_ambiguous_binaries(self):
+        with self.assertRaises(ValueError):
+            connector.patch_catalog_limit_bytes(b"\x7fELF" + b"\x00" * 500)
+        with self.assertRaises(ValueError):
+            connector.patch_catalog_limit_bytes(
+                self.binary(connector.CATALOG_LIMIT_IMMEDIATE, sites=2))
+        with self.assertRaises(ValueError):
+            connector.patch_catalog_limit_bytes(self.binary(4096))
+
+
 class ClientOverrideTests(unittest.TestCase):
     """client install 记录的客户端应优先于 PATH 中的官方 Codex。"""
 
