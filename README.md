@@ -11,26 +11,26 @@ Linux/macOS/WSL 还需要 Python 3.8+ 和 curl；Windows 安装器自动准备�
 **原生 Windows：在 PowerShell 中执行一条命令。**
 
 ```powershell
-irm https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.ps1 | iex
+irm https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.5/install.ps1 | iex
 ```
 
 地址已知时，可以仍用一条命令，仅交互输入密钥：
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.ps1'))) -Url 'https://your-provider.example/v1'
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.5/install.ps1'))) -Url 'https://your-provider.example/v1'
 ```
 
 **Linux / macOS / WSL：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.5/install.sh | bash
 ```
 
 按提示输入 Provider API 地址（通常以 `/v1` 结尾）和 API key；密钥隐藏输入。
 也可在同一条命令里提供非敏感地址：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- --url https://your-provider.example/v1
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.5/install.sh | bash -s -- --url https://your-provider.example/v1
 ```
 
 这是执行远程安装脚本的命令。入口固定到版本标签（`CODEX_CONNECT_REF` 可换版本，`CODEX_CONNECT_BASE` 可换镜像）；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.
 - 已经配过 Codex provider 的话，可以直接指定它，连地址和密钥都不用给：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- --provider ywl
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.5/install.sh | bash -s -- --provider ywl
 ```
 
 ```bash
@@ -61,7 +61,7 @@ codex-provider configure --provider ywl    # 等价的手动命令
 超过会静默丢弃整个目录。加一个参数即可在安装时解除，不下载任何大文件：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.5/install.sh | bash -s -- \
   --url https://your-provider.example/v1 \
   --patch-catalog-limit
 ```
@@ -80,8 +80,12 @@ codex-provider client remove                                   # 回到官方 Co
 ```
 
 实测的目录上限：补丁前 0.95 MiB 通过、1.5 MiB 起丢弃；补丁后 7.9 MiB 通过、
-8.5 MiB 起丢弃（同一个本地代理、同一份载荷，只换客户端）。签名偏移与复现步骤见
-`patches/README.md`。
+8.5 MiB 起丢弃（同一个本地代理、同一份载荷，只换客户端）。
+
+npm / Homebrew 安装的 `codex` 是 JS 包装，工具会自己找到平台包里的原生二进制再打补丁：
+`<node_modules>/@openai/codex-<平台>/vendor/<目标三元组>/bin/codex`。macOS 上补丁后会做 ad-hoc
+重签名（`codesign --force --sign -`），然后用 `--version` 确认副本能跑；任何一步失败都会放弃并保留原状。
+各架构的签名偏移与验证方式见 `patches/README.md`。
 
 补丁只影响 `model_catalog_url` 这条路径；通过本工具启动时用的是 `model_catalog_json`
 本地文件，本来就不受 1 MiB 限制。官方 Codex 安装不被修改，补丁客户端单独存放，
@@ -165,7 +169,7 @@ v0.1.2 起在每次同步时修正已确认的旧模板，不要求用户编辑 
 DeepSeek 保留编码代理的授权与验证要求；Web 提示词仅要求直接回答、结合对话/附件并如实说明不确定性。当前部署的 Web 后端另有问答转换层，剔除客户端的 Codex 系统/开发者模板、工具定义与执行记录、运行环境和技能注入，仅保留真实问答及附件。
 不会凭模型名称扩大上下文窗口、打开图像、搜索、并行或其他工具能力。目录声明本身不是这些能力的实测证明。
 这属于接入工具的客户端修正：不会修改 Provider 原始响应，也不会更新已经打开的会话。
-升级时重新运行上方 v0.1.4 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
+升级时重新运行上方 v0.1.5 安装命令并通过 `codex-provider` 启动。用户显式覆盖基础提示词的配置仍可能优先。
 
 同步时还会丢掉 `model_messages` 里四段用不到的文案：`confirmation_policies`、
 `persistent_instructions`、`token_budget`、`guardian_v2`。它们占目录一半体积（实测约 790 KB），
@@ -175,7 +179,7 @@ DeepSeek 保留编码代理的授权与验证要求；Web 提示词仅要求直�
 
 ## 发布维护
 
-v0.1.4 增加 `--provider`：直接复用 `config.toml` 里已有的 provider，重复安装不再询问地址与密钥。同版本增加 `--patch-catalog-limit`：安装时对现成的官方 `codex` 做一次定点字节替换，
+v0.1.5 让 `--patch-catalog-limit` 支持 npm 安装的 Codex（自动从 `bin/codex.js` 找到平台包里的原生二进制）以及 arm64（Apple Silicon / Linux arm64）；macOS 上补丁后会做 ad-hoc 重签名，否则系统会拒绝运行改动过的二进制。v0.1.4 增加 `--provider`：直接复用 `config.toml` 里已有的 provider，重复安装不再询问地址与密钥。同版本增加 `--patch-catalog-limit`：安装时对现成的官方 `codex` 做一次定点字节替换，
 把目录上限从 1 MiB 提到 8 MiB，并保留 `client install` 作为预编译客户端的备选。同版本还会在同步时
 丢掉四段用不到的 `model_messages` 文案（约 790 KB），实测精简后的目录降到 0.99 MiB。
 v0.1.4 同时修复目录只写 Provider 结果导致的模型缺失。`model_catalog_json` 是整体替换而非合并，

@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 
 DEEPSEEK_INSTRUCTIONS = """You are a coding assistant powered by DeepSeek and running in Codex. Do not claim to be GPT or infer capabilities from the client name.
@@ -574,43 +574,89 @@ def remove_client(arguments):
 
 
 # 官方客户端把显式目录(model_catalog_url)限制在 1 MiB，超过就整份丢弃且不报错。
-# 下面这段签名是 `MAX_MODEL_CATALOG_BYTES` 在机器码里的形状；在三个独立构建
-# (官方 0.160.0 stripped、8 MiB 重编译版、collab-plaintext 调试版)里逐字节一致。
-CATALOG_LIMIT_SIGNATURE_PRE = bytes.fromhex(
-    "6804000048898b480600004c89bb50060000488dabc01a0000c683c01a000000")
-CATALOG_LIMIT_SIGNATURE_OPCODE = bytes.fromhex("b9")
-CATALOG_LIMIT_SIGNATURE_POST = bytes.fromhex(
-    "488d935806000048899424500100004889835806000048898b600600000f1083")
+# 那段初始化代码在机器码里留下的形状是跨架构、跨打包一致的：
+#   x86_64:  movb [rbx+0x1ac0], 0 ; (41) b8-bf imm32      <- imm32 = 1 MiB
+#   aarch64: 同一结构里 str [xN,#0x648/#0x650/#0x658/#0x660] 夹着
+#            movz w?, #0x10, lsl #16                     <- 0x10<<16 = 1 MiB
+# 结构偏移来自源码里的结构体布局；官方 0.160.0 的 ELF/ Mach-O、x86_64/arm64 四个
+# 构建都只有唯一命中。
 CATALOG_LIMIT_IMMEDIATE = 1024 * 1024
 CATALOG_LIMIT_PATCHED = 8 * 1024 * 1024
+X64_ANCHOR = bytes.fromhex("c683c01a000000")          # movb [rbx+0x1ac0], 0
+X64_MOV_IMM32 = tuple(range(0xB8, 0xC0))               # mov r32, imm32
+ARM64_MOVZ_MASK_1MIB = 0x52A00000                      # movz w?/x?, #imm16, lsl #16
+ARM64_STRUCT_OFFSETS = (0x648, 0x650, 0x658, 0x660)
 EXECUTABLE_MAGICS = (bytes.fromhex("7f454c46"), bytes.fromhex("cffaedfe"),
                      bytes.fromhex("cafebabe"), bytes.fromhex("feedface"))
 
 
-def catalog_limit_sites(data, with_context=True):
-    """定位目录上限立即数；返回 [(立即数偏移, 当前值)]。"""
-    prefix = (CATALOG_LIMIT_SIGNATURE_PRE if with_context else b"") + CATALOG_LIMIT_SIGNATURE_OPCODE
-    length = len(data)
+def binary_arch(data):
+    """返回 "x86_64" / "aarch64" / None。"""
+    if data[:4] == bytes.fromhex("7f454c46"):
+        machine = int.from_bytes(data[18:20], "little")
+        return {0x3E: "x86_64", 0xB7: "aarch64"}.get(machine)
+    if data[:4] in (bytes.fromhex("cffaedfe"), bytes.fromhex("cefaedfe")):
+        cpu = int.from_bytes(data[4:8], "little")
+        return {0x01000007: "x86_64", 0x0100000C: "aarch64"}.get(cpu)
+    return None
+
+
+def x64_catalog_limit_sites(data):
+    """x86_64: 锚点之后的 mov r32, imm32 立即数。"""
     sites = []
     start = 0
     while True:
-        found = data.find(prefix, start)
+        found = data.find(X64_ANCHOR, start)
         if found < 0:
             return sites
         start = found + 1
-        position = found + len(prefix)
-        if position + 4 > length:
+        cursor = found + len(X64_ANCHOR)
+        if cursor < len(data) and data[cursor] == 0x41:      # REX.B 前缀
+            cursor += 1
+        if cursor + 5 > len(data) or data[cursor] not in X64_MOV_IMM32:
             continue
-        if with_context:
-            tail = bytes(data[position + 4:position + 4 + len(CATALOG_LIMIT_SIGNATURE_POST)])
-            if tail != CATALOG_LIMIT_SIGNATURE_POST:
+        sites.append((cursor + 1, int.from_bytes(bytes(data[cursor + 1:cursor + 5]), "little")))
+
+
+def arm64_catalog_limit_sites(data):
+    """aarch64: movz #0x10,lsl16 且同窗口出现 0x648/0x650/0x658/0x660 四个结构偏移。"""
+    sites = []
+    for offset in range(0, len(data) - 4, 4):
+        word = int.from_bytes(bytes(data[offset:offset + 4]), "little")
+        if (word & 0x7FE00000) != ARM64_MOVZ_MASK_1MIB:
+            continue
+        seen = set()
+        for nearby in range(offset - 96, offset + 96, 4):
+            if nearby < 0 or nearby + 4 > len(data):
                 continue
-        sites.append((position, int.from_bytes(bytes(data[position:position + 4]), "little")))
+            other = int.from_bytes(bytes(data[nearby:nearby + 4]), "little")
+            if (other & 0xFFC00000) == 0xF9000000:           # str xt, [xn, #imm]
+                seen.add(((other >> 10) & 0xFFF) * 8)
+        if all(item in seen for item in ARM64_STRUCT_OFFSETS):
+            immediate = ((word >> 5) & 0xFFFF) << 16
+            sites.append((offset, immediate, word))
+    return [(offset, immediate) for offset, immediate, _ in sites]
+
+
+def catalog_limit_sites(data, arch=None):
+    """返回 [(立即数偏移, 当前值)]；arch 缺省时按文件头判断。"""
+    arch = arch or binary_arch(data)
+    if arch == "x86_64":
+        return x64_catalog_limit_sites(bytearray(data))
+    if arch == "aarch64":
+        return arm64_catalog_limit_sites(bytearray(data))
+    return []
 
 
 def patch_catalog_limit_bytes(data):
-    """把客户端二进制里的 1 MiB 目录上限立即数改成 8 MiB；返回 (新内容, 说明)。"""
-    sites = catalog_limit_sites(bytearray(data), with_context=True)
+    """把客户端二进制里的 1 MiB 目录上限改成 8 MiB；返回 (新内容, 说明)。"""
+    arch = binary_arch(data)
+    if arch is None:
+        raise ValueError("无法识别的客户端格式（既不是 ELF 也不是 Mach-O）。")
+    if arch == "x86_64":
+        sites = x64_catalog_limit_sites(bytearray(data))
+    else:
+        sites = arm64_catalog_limit_sites(bytearray(data))
     if len(sites) != 1:
         raise ValueError(
             "找不到唯一的目录上限签名（匹配 %d 处）；这个客户端版本没有经过验证，拒绝盲改。"
@@ -622,8 +668,79 @@ def patch_catalog_limit_bytes(data):
         raise ValueError("目录上限立即数是 %d，不是预期中的 %d；拒绝盲改。"
                          % (immediate, CATALOG_LIMIT_IMMEDIATE))
     patched = bytearray(data)
-    patched[position:position + 4] = CATALOG_LIMIT_PATCHED.to_bytes(4, "little")
-    return bytes(patched), "目录上限 1 MiB -> 8 MiB（偏移 0x%x）" % position
+    if arch == "x86_64":
+        patched[position:position + 4] = CATALOG_LIMIT_PATCHED.to_bytes(4, "little")
+    else:
+        word = int.from_bytes(bytes(patched[position:position + 4]), "little")
+        patched[position:position + 4] = (((word & 0xFFE0001F) | (0x80 << 5)).to_bytes(4, "little"))
+    return bytes(patched), "目录上限 1 MiB -> 8 MiB（%s，偏移 0x%x）" % (arch, position)
+
+
+NPM_PLATFORM_PACKAGES = {
+    ("darwin", "arm64"): ("codex-darwin-arm64", "aarch64-apple-darwin"),
+    ("darwin", "x86_64"): ("codex-darwin-x64", "x86_64-apple-darwin"),
+    ("linux", "x86_64"): ("codex-linux-x64", "x86_64-unknown-linux-musl"),
+    ("linux", "aarch64"): ("codex-linux-arm64", "aarch64-unknown-linux-musl"),
+    ("win32", "x86_64"): ("codex-win32-x64", "x86_64-pc-windows-msvc"),
+    ("win32", "arm64"): ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
+}
+
+
+def npm_platform_binary(source_path):
+    """npm 安装的 codex 是 JS 包装；这里找到它真正执行的原生二进制。
+
+    包装脚本 bin/codex.js 的规则是 <平台包>/vendor/<目标三元组>/bin/codex。
+    """
+    import platform as platform_module
+    machine = platform_module.machine().lower()
+    machine = {"amd64": "x86_64", "arm64": "arm64", "aarch64": "aarch64"}.get(machine, machine)
+    if machine == "aarch64":
+        machine = "arm64"
+    key = ("win32" if os.name == "nt" else "darwin" if sys.platform == "darwin" else "linux", machine)
+    entry = NPM_PLATFORM_PACKAGES.get(key)
+    if not entry:
+        return None
+    package, triple = entry
+    executable = "codex.exe" if os.name == "nt" else "codex"
+    package_root = source_path.parent.parent
+    candidates = [package_root / "vendor" / triple / "bin" / executable]
+    base = package_root
+    for _ in range(8):
+        # base 可能是 node_modules，也可能是 @openai 目录本身。
+        candidates.append(base / package / "vendor" / triple / "bin" / executable)
+        candidates.append(base / "@openai" / package / "vendor" / triple / "bin" / executable)
+        base = base.parent
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and candidate.read_bytes()[:4] in EXECUTABLE_MAGICS:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def resolve_native_binary(source_path):
+    """把 --source / PATH 里的 codex 解析成可打补丁的原生二进制。"""
+    header = source_path.read_bytes()[:4]
+    if header in EXECUTABLE_MAGICS:
+        return source_path
+    native = npm_platform_binary(source_path)
+    if native is None:
+        raise ValueError(
+            "这是脚本而不是原生二进制客户端（npm 安装的 codex 只是包装）：%s；"
+            "没能在同目录树里找到平台包的原生二进制，请用 --source 直接指向它。" % source_path)
+    return native
+
+
+def resign_macos(path):
+    """macOS 会拒绝运行签名失效的二进制；改完字节必须重新 ad-hoc 签名。"""
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(["codesign", "--force", "--sign", "-", str(path)],
+                       check=True, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("补丁后 ad-hoc 重签名失败（macOS 会拒绝运行改动过的二进制）：%s" % error) from None
 
 
 def patch_client(arguments):
@@ -640,12 +757,11 @@ def patch_client(arguments):
     source = args.source or shutil.which("codex")
     if not source:
         raise ValueError("PATH 中找不到 codex；请用 --source 指定官方客户端路径。")
-    source_path = Path(source).expanduser().resolve()
-    if not source_path.is_file():
-        raise ValueError("官方客户端不存在：%s" % source_path)
+    entry_path = Path(source).expanduser().resolve()
+    if not entry_path.is_file():
+        raise ValueError("官方客户端不存在：%s" % entry_path)
+    source_path = resolve_native_binary(entry_path)
     original = source_path.read_bytes()
-    if original[:4] not in EXECUTABLE_MAGICS:
-        raise ValueError("这是脚本而不是原生二进制客户端（npm 安装的 codex 是 JS 包装）：%s" % source_path)
     patched, note = patch_catalog_limit_bytes(original)
 
     target_dir = state_directory() / "client"
@@ -654,6 +770,7 @@ def patch_client(arguments):
     pending = target_dir / ".pending-client"
     pending.write_bytes(patched)
     os.chmod(pending, 0o755)
+    resign_macos(pending)
     try:
         version = subprocess.run([str(pending), "--version"], check=True, capture_output=True,
                                  text=True, timeout=60).stdout.strip()
@@ -662,7 +779,7 @@ def patch_client(arguments):
         raise ValueError("补丁后的客户端无法执行 --version；已放弃，未启用。") from None
     os.replace(pending, target)
     private_json(record_path, {"path": str(target), "sha256": _sha256_file(target),
-                               "source": str(source_path),
+                               "source": str(source_path), "entry": str(entry_path),
                                "source_sha256": _sha256_file(source_path),
                                "version": version, "patch": note})
     print("已安装补丁客户端：%s（%s）" % (target, version), file=sys.stderr)

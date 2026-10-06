@@ -3,50 +3,67 @@
 官方 Codex 在读取**显式配置的目录**（`model_catalog_url`）时限制 1 MiB，超过就丢弃整份目录、
 不报错。上游目录约 1.7 MiB，所以这条路径默认拿不到模型。
 
-`codex-provider client patch`（安装脚本里的 `--patch-catalog-limit`）把现成的官方 `codex`
-复制一份，就地把那个 `1 MiB` 立即数改成 `8 MiB`。不重新编译，不下载预编译客户端，原文件不动。
+`codex-provider client patch`（安装脚本里的 `--patch-catalog-limit`）把现成的客户端复制一份，
+就地把那个 `1 MiB` 立即数改成 `8 MiB`。不重新编译，不下载预编译产物，原文件不动。
 
 ## 定位方式
 
-`MAX_MODEL_CATALOG_BYTES` 在机器码里是一条 `mov ecx, 0x100000` 立即数。它前后各 32 字节的上下文
-在三个独立构建里逐字节一致，可以直接当签名用：
+那段初始化代码在机器码里留下的形状，跨架构、跨打包方式都一致。锚点是源码里结构体布局产生的
+固定偏移（`0x1ac0` 与 `0x648/0x650/0x658/0x660`）：
 
-| 客户端 | 立即数偏移 | 前后文 |
+| 架构 | 形状 | 立即数 |
 | --- | --- | --- |
-| 官方 0.160.0（stripped，289 MB） | `0x97ed784` | 一致 |
-| collab-plaintext 调试版（1.38 GB） | `0x9796754` | 一致 |
-| 8 MiB 重编译版（已打过） | `0x9796194` | 一致，值为 `0x800000` |
+| x86_64 | `movb [rbx+0x1ac0], 0` 之后紧跟 `(41) b8-bf imm32` | 32 位立即数 |
+| aarch64 | 同一窗口里 `str [xN,#0x648/#0x650/#0x658/#0x660]` 夹着 `movz w?/x?, #imm16, lsl #16` | `imm16 << 16` |
 
-- 前 32 字节：`6804000048898b480600004c89bb50060000488dabc01a0000c683c01a000000`
-- 操作码：`b9`
-- 立即数：`00001000`（1 MiB）→ `00008000`（8 MiB）
-- 后 32 字节：`488d935806000048899424500100004889835806000048898b600600000f1083`
+官方 0.160.0 的四个构建都只有唯一命中：
 
-签名必须**唯一命中**。命中 0 处或多处、或立即数既不是 `0x100000` 也不是已打过补丁的 `0x800000`，
+| 客户端 | 架构 | 立即数偏移 | npm 路径 |
+| --- | --- | --- | --- |
+| standalone linux-x64 / `@openai/codex-linux-x64` | x86_64 ELF | `0x97ed784` | `vendor/x86_64-unknown-linux-musl/bin/codex` |
+| `@openai/codex-darwin-x64` | x86_64 Mach-O | `0x8661d5f` | `vendor/x86_64-apple-darwin/bin/codex` |
+| `@openai/codex-linux-arm64` | aarch64 ELF | `0x7bedef0` | `vendor/aarch64-unknown-linux-musl/bin/codex` |
+| `@openai/codex-darwin-arm64` | aarch64 Mach-O | `0x72aad20` | `vendor/aarch64-apple-darwin/bin/codex` |
+
+签名必须**唯一命中**。命中 0 处或多处、或立即数既不是 1 MiB 也不是已打过补丁的 8 MiB，
 都直接报错退出，不做猜测性改写。0.157.1 这类没有该签名的版本会被拒绝。
+
+## npm / Homebrew 安装
+
+npm 装出来的 `codex` 是 JS 包装（`bin/codex.js`），真正的二进制在平台包里：
+
+```
+<node_modules>/@openai/codex-<平台>-<架构>/vendor/<目标三元组>/bin/codex
+```
+
+工具会按包装脚本的同一套规则（`POLICIES` 里的目标三元组映射）自动找到它，`codex-provider client status`
+里同时记录包装路径（`entry`）和实际打补丁的二进制（`source`）。
+
+macOS 的二进制带 `LC_CODE_SIGNATURE`，改完字节签名即失效、系统会拒绝运行，所以补丁后会自动执行
+`codesign --force --sign - <文件>` 重新 ad-hoc 签名，再用 `--version` 确认副本能启动；任一步失败都会
+放弃并保留原状。
 
 ## 实测
 
-同一份本地代理载荷，只替换客户端二进制：
+同一份本地代理载荷，只替换客户端二进制（x86_64，运行时验证）：
 
-| 载荷 | 官方 0.160.0 | `client patch` 产物 |
+| 载荷 | 官方 0.160.0 | 补丁产物 |
 | --- | --- | --- |
-| 0.50 MiB | 1 条 | 1 条 |
 | 0.95 MiB | 1 条 | 1 条 |
 | 1.50 MiB | 0 条 | 1 条 |
-| 7.00 MiB | 0 条 | 1 条 |
 | 7.90 MiB | 0 条 | 1 条 |
 | 8.50 MiB | 0 条 | 0 条 |
-| 9.00 MiB | 0 条 | 0 条 |
 
-上限确实从 1 MiB 变成 8 MiB。
+npm 打包的 linux-x64 二进制重跑同一张表，结果一致。arm64 与 macOS 目前是静态验证
+（补丁后立即数确认为 8 MiB、指令流其余部分不变）；运行时验证需要在对应机器上跑一次。
 
 ## 复现
 
 ```bash
-codex-provider client patch --source /path/to/codex   # 复制、替换、--version 自检
-codex-provider client status                          # 记录 sha256 / 来源 / 偏移
-codex-provider client remove                          # 回到官方 Codex
+codex-provider client patch                                  # 自动解析 PATH 里的 codex
+codex-provider client patch --source /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js
+codex-provider client status                                 # 记录 entry / source / sha256 / 偏移
+codex-provider client remove                                 # 回到官方 Codex
 ```
 
 ## 源码补丁（备选）
@@ -59,4 +76,4 @@ codex-provider client remove                          # 回到官方 Codex
 codex-provider client install <预编译客户端 URL 或本地路径> --sha256 <64 位校验和>
 ```
 
-两条路互斥：`--client` 装预编译产物，`--patch-catalog-limit` 就地改现成的官方二进制。
+两条路互斥：`--client` 装预编译产物，`--patch-catalog-limit` 就地改现成的客户端二进制。

@@ -7,11 +7,11 @@
 #   --patch-catalog-limit     复制官方 codex 并直接替换目录上限立即数(1 MiB -> 8 MiB)
 #   --provider <名字>         直接复用 config.toml 里已有的 model_providers.<名字>，不询问地址与密钥
 # 已有 connection.json 时不再重复询问；强制重来加 --reconfigure
-# 环境变量：CODEX_CONNECT_REF(默认 v0.1.4) CODEX_CONNECT_BASE(默认 GitHub raw 地址)
+# 环境变量：CODEX_CONNECT_REF(默认 v0.1.5) CODEX_CONNECT_BASE(默认 GitHub raw 地址)
 set -euo pipefail
 
 main() {
-    local release="${CODEX_CONNECT_REF:-v0.1.4}"
+    local release="${CODEX_CONNECT_REF:-v0.1.5}"
     local base="${CODEX_CONNECT_BASE:-https://raw.githubusercontent.com/Molaison/codex-provider-connect/${release}}"
     local destination="${HOME}/.local/bin/codex-provider"
     local temporary
