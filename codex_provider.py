@@ -10,10 +10,16 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+
+try:  # Python 3.11+
+    import tomllib
+except ImportError:  # pragma: no cover - Python 3.8-3.10 用下面的最小解析
+    tomllib = None
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -231,7 +237,7 @@ def fetch_catalog(connection, binary):
     query = urllib.parse.urlencode({"client_version": version})
     request = urllib.request.Request(
         connection["url"] + "/models?" + query,
-        headers={"Authorization": "Bearer " + connection["api_key"],
+        headers={"Authorization": "Bearer " + resolved_key(connection),
                  "User-Agent": "codex_cli_rs/" + version,
                  "Accept": "application/json"},
     )
@@ -243,7 +249,7 @@ def fetch_catalog(connection, binary):
         except urllib.error.HTTPError as error:
             if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
                 raise ValueError("Provider 模型目录返回 HTTP %s；请检查 URL、密钥和服务状态。" % error.code) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError):
             if attempt == 2:
                 raise ValueError("模型目录连接失败（三次有界尝试）；未使用旧目录启动 Codex。") from None
         time.sleep(attempt + 1)
@@ -315,21 +321,172 @@ def prompt_key():
         return getpass.getpass("Provider API key（隐藏输入）：", stream=terminal_out)
 
 
+def config_path():
+    """当前 CODEX_HOME 下的 config.toml。"""
+    return state_directory().parent / "config.toml"
+
+
+def _strip_comment(line):
+    out = []
+    quote = None
+    for character in line:
+        if quote:
+            out.append(character)
+            if character == quote:
+                quote = None
+        elif character in "\"'":
+            quote = character
+            out.append(character)
+        elif character == "#":
+            break
+        else:
+            out.append(character)
+    return "".join(out)
+
+
+def _scalar(raw):
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+def _value(raw):
+    """最小解析里的值：数组取元素，其余去引号。"""
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        return [_scalar(item) for item in raw[1:-1].split(",") if item.strip()]
+    return _scalar(raw)
+
+
+def _toml_tables(text):
+    """没有 tomllib 时的最小解析：只取 [表] 下的 键 = 值。"""
+    tables = {}
+    current = None
+    for line in text.splitlines():
+        line = _strip_comment(line).strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line.strip("[]").strip()
+            tables.setdefault(current, {})
+            continue
+        if current is not None and "=" in line:
+            key, _, value = line.partition("=")
+            tables[current][key.strip()] = value.strip()
+    return tables
+
+
+def config_provider(name):
+    """读取 config.toml 里 model_providers.<name> 的 base_url 与凭据。"""
+    path = config_path()
+    if not path.is_file():
+        raise ValueError("找不到 %s；--provider 需要一份已有的 Codex 配置。" % path)
+    text = path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        try:
+            block = tomllib.loads(text).get("model_providers", {}).get(name)
+        except tomllib.TOMLDecodeError as error:
+            raise ValueError("%s 不是合法 TOML：%s" % (path, error)) from None
+        if not isinstance(block, dict):
+            block = None
+        auth = block.get("auth") if isinstance(block, dict) else None
+    else:  # pragma: no cover - 老解释器路径
+        tables = _toml_tables(text)
+        raw = tables.get("model_providers." + name)
+        block = {key: _value(value) for key, value in raw.items()} if raw else None
+        auth_raw = tables.get("model_providers." + name + ".auth")
+        auth = {key: _value(value) for key, value in auth_raw.items()} if auth_raw else None
+    if not block:
+        raise ValueError("config.toml 里没有 model_providers.%s；请确认 provider 名字。" % name)
+    url = block.get("base_url")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("model_providers.%s 没有 base_url，无法直接复用。" % name)
+    connection = {"url": normalize_url(url), "provider": name}
+    auth = auth if isinstance(auth, dict) else {}
+    command = auth.get("command")
+    if isinstance(command, str) and command.strip():
+        target = [command]
+        arguments = auth.get("args")
+        if isinstance(arguments, list):
+            target.extend(str(item) for item in arguments)
+        connection["auth_command"] = target
+        connection["api_key"] = run_auth_command(target)
+        return connection
+    token = block.get("experimental_bearer_token")
+    if isinstance(token, str) and token.strip():
+        connection["api_key"] = token.strip()
+        return connection
+    env_key = block.get("env_key")
+    if isinstance(env_key, str) and os.environ.get(env_key):
+        connection["api_key"] = os.environ[env_key].strip()
+        return connection
+    raise ValueError("model_providers.%s 没有 auth 命令、experimental_bearer_token 或可用的 env_key；"
+                     "请改用 --url 与密钥。" % name)
+
+
+def run_auth_command(target):
+    try:
+        result = subprocess.run(target, check=True, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("provider auth 命令执行失败：%s（%s）" % (" ".join(target), error)) from None
+    key = result.stdout.strip()
+    if not key:
+        raise ValueError("provider auth 命令没有输出密钥：%s" % " ".join(target))
+    return key
+
+
+def saved_connection():
+    try:
+        return read_connection()
+    except (ValueError, OSError, json.JSONDecodeError):
+        return None
+
+
+def resolved_key(connection):
+    """auth 命令每次都重新取；否则用保存的密钥。"""
+    if connection.get("auth_command"):
+        return run_auth_command(connection["auth_command"])
+    key = connection.get("api_key")
+    if not key:
+        raise ValueError("已保存的连接没有密钥；请运行 codex-provider configure --provider NAME。")
+    return key
+
+
 def configure(arguments):
-    parser = argparse.ArgumentParser(prog="codex-provider configure", description="连接 Provider；密钥隐藏输入，不修改现有 Codex 配置。")
+    parser = argparse.ArgumentParser(prog="codex-provider configure", description="连接 Provider；可从现有 config.toml 直接指定，不修改该配置。")
     parser.add_argument("--url", default=os.environ.get("CODEX_PROVIDER_URL"), help="Provider API 根地址（通常以 /v1 结尾）")
+    parser.add_argument("--provider", default=os.environ.get("CODEX_PROVIDER_NAME"),
+                        help="直接复用 config.toml 里已有的 model_providers.<名字>（含 base_url 与凭据）")
+    parser.add_argument("--reconfigure", action="store_true", help="忽略已保存的连接，重新询问地址与密钥")
     args = parser.parse_args(arguments)
     binary = codex_binary()
-    url = args.url
-    if not url:
-        url = prompt_url()
-    url = normalize_url(url)
-    key = os.environ.get("CODEX_PROVIDER_API_KEY")
-    if not key:
+    saved = saved_connection()
+    if args.provider:
+        connection = config_provider(args.provider)
+        print("使用 config.toml 里的 model_providers.%s。" % args.provider, file=sys.stderr)
+    elif args.url:
+        url = normalize_url(args.url)
+        key = os.environ.get("CODEX_PROVIDER_API_KEY")
+        if not key and saved and saved.get("url") == url and saved.get("api_key"):
+            key = saved["api_key"]              # 地址没变就沿用，不重复输入
+            print("地址与已保存连接一致，沿用原密钥。", file=sys.stderr)
+        if not key:
+            key = prompt_key()
+        if not key or not key.strip():
+            raise ValueError("API key 不能为空。")
+        connection = {"url": url, "api_key": key.strip()}
+    elif saved and saved.get("api_key") and not args.reconfigure:
+        connection = dict(saved)
+        print("沿用已保存的连接%s（换地址用 --url 或 --provider，强制重来加 --reconfigure）。"
+              % ("：" + connection.get("provider", connection["url"]) if connection.get("provider") else "：" + connection["url"]),
+              file=sys.stderr)
+    else:
+        url = normalize_url(prompt_url())
         key = prompt_key()
-    if not key or not key.strip():
-        raise ValueError("API key 不能为空。")
-    connection = {"url": url, "api_key": key.strip()}
+        if not key or not key.strip():
+            raise ValueError("API key 不能为空。")
+        connection = {"url": url, "api_key": key.strip()}
     secure_directory(state_directory())
     fetch_catalog(connection, binary)
     private_json(state_directory() / "connection.json", connection)
@@ -544,7 +701,9 @@ def main():
     if arguments and arguments[0] in ("--help", "-h"):
         print("""codex-provider-connect
 
-  codex-provider configure [--url URL]   配置连接并同步模型
+  codex-provider configure [--url URL] [--provider NAME]
+                                         配置连接并同步模型；--provider 直接复用 config.toml
+                                         里已有的 model_providers.<NAME>，不重复输入地址与密钥
   codex-provider sync                    仅刷新目录
   codex-provider client status           查看当前使用的客户端
   codex-provider client install SRC      安装预编译的补丁客户端, 需 --sha256
@@ -579,7 +738,7 @@ def main():
     options = ["-c", 'model_provider="provider_connect"',
                "-c", "model_catalog_json=" + json.dumps(str(catalog)),
                "-c", "model_providers.provider_connect=" + provider]
-    environment = dict(os.environ, CODEX_PROVIDER_API_KEY=connection["api_key"])
+    environment = dict(os.environ, CODEX_PROVIDER_API_KEY=resolved_key(connection))
     command = binary + options + arguments
     if os.name == "nt":
         sys.exit(subprocess.call(command, env=environment))

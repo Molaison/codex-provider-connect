@@ -35,6 +35,26 @@ curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.
 
 这是执行远程安装脚本的命令。入口固定到版本标签（`CODEX_CONNECT_REF` 可换版本，`CODEX_CONNECT_BASE` 可换镜像）；需要审阅时，先下载该脚本及同版本的 `codex_provider.py`。
 
+### 不重复输入地址与密钥
+
+第一次装好之后，`provider-connect/connection.json` 已经记住地址与密钥：
+
+- 再跑一次安装命令（升级、换版本、重装）不会重新询问，直接沿用已保存的连接。
+- 想改地址用 `--url`；地址没变时会沿用原密钥，不会让你再输一遍；强制重来加 `--reconfigure`。
+- 已经配过 Codex provider 的话，可以直接指定它，连地址和密钥都不用给：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.4/install.sh | bash -s -- --provider ywl
+```
+
+```bash
+codex-provider configure --provider ywl    # 等价的手动命令
+```
+
+`--provider <名字>` 读的是 `$CODEX_HOME/config.toml` 里的 `[model_providers.<名字>]`：`base_url` 直接复用，
+凭据按 `[model_providers.<名字>.auth]` 命令、`experimental_bearer_token`、`env_key` 的顺序解析。
+用 auth 命令的 provider 每次启动会重新执行该命令取密钥，token 轮转后不用改任何配置。
+
 ### 可选：解除官方客户端的 1 MiB 目录上限
 
 官方 Codex 读取显式配置的目录（`model_catalog_url`）时限制 1 MiB，上游目录约 1.7 MiB，
@@ -155,7 +175,7 @@ DeepSeek 保留编码代理的授权与验证要求；Web 提示词仅要求直�
 
 ## 发布维护
 
-v0.1.4 增加 `--patch-catalog-limit`：安装时对现成的官方 `codex` 做一次定点字节替换，
+v0.1.4 增加 `--provider`：直接复用 `config.toml` 里已有的 provider，重复安装不再询问地址与密钥。同版本增加 `--patch-catalog-limit`：安装时对现成的官方 `codex` 做一次定点字节替换，
 把目录上限从 1 MiB 提到 8 MiB，并保留 `client install` 作为预编译客户端的备选。同版本还会在同步时
 丢掉四段用不到的 `model_messages` 文案（约 790 KB），实测精简后的目录降到 0.99 MiB。
 v0.1.4 同时修复目录只写 Provider 结果导致的模型缺失。`model_catalog_json` 是整体替换而非合并，

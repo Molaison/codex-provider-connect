@@ -5,6 +5,8 @@
 #   --client <URL 或路径>       安装预编译的补丁客户端（例如移除 1 MiB 目录上限的 Codex）
 #   --client-sha256 <校验和>    远程 --client 必填
 #   --patch-catalog-limit     复制官方 codex 并直接替换目录上限立即数(1 MiB -> 8 MiB)
+#   --provider <名字>         直接复用 config.toml 里已有的 model_providers.<名字>，不询问地址与密钥
+# 已有 connection.json 时不再重复询问；强制重来加 --reconfigure
 # 环境变量：CODEX_CONNECT_REF(默认 v0.1.4) CODEX_CONNECT_BASE(默认 GitHub raw 地址)
 set -euo pipefail
 
