@@ -1,6 +1,6 @@
 # Codex Provider Connect
 
-**默认复用已有 API 地址和 key，配置原生 `codex`，并验证一次真实工具调用。** 使用官方原版客户端，不打补丁，不新增日常 CLI。
+**默认复用已有 Codex、API 地址和 key，合并配置并验证真实工具调用。** 不重装已有客户端、不打补丁、不新增日常 CLI；完全没有客户端时才下载官方原版。
 
 ## 安装后直接用 `codex`
 
@@ -18,7 +18,9 @@
 
 下载使用 HTTP/1.1，兼容 HTTP/2 流不稳定的代理；仍使用原代理和 TLS 校验。GitHub 下载需能访问 `github.com` 和 `release-assets.githubusercontent.com`。若原代理已停止，先恢复它或由用户明确允许这些域名直连，再重跑；安装器不会擅改代理。
 
-安装器会准备固定版本的**官方 Codex 0.162.1**，检查地址和密钥权限，写入原生配置，再用只读工具读取随机文件并核对完整回答。无需先装 Codex、npm 或手动编辑 TOML。
+优先使用 CODEX_BINARY 或 PATH 中现有的 Codex，其次复用本地入口、standalone 和已下载缓存。已有客户端不重新下载，不替换 npm/系统入口，也不强制调整其 PATH。现有版本低于 0.162.1 时明确报错，要求用户升级，不擅自降级或重装。完全找不到客户端时才下载官方原版 0.162.1。
+
+随后检查地址和密钥权限、合并原生配置，再用只读工具读取随机文件并核对完整回答。无需先装 Codex、npm 或手动编辑 TOML。
 
 **只有 `[READY]`、退出码 0 才表示真实自检通过。** 菜单能显示、网络可达或 `--skip-check` 都不算通过。首次安装通常需要下载时间和一次模型响应；前台自检最多等待 10 分钟。
 
@@ -28,7 +30,9 @@
 codex
 ```
 
-在原生 `/model` 菜单选择模型；`codex resume` 等官方命令照常使用。`~/.local/bin/codex` 直接指向官方可执行文件，不是包了一层的启动器。当前终端尚未刷新 PATH 时，可直接运行 `~/.local/bin/codex`。
+在原生 `/model` 菜单选择模型；`codex resume` 等命令照常使用。已有启动入口原样保留；仅首次安装或暴露已有缓存时才创建 `~/.local/bin/codex`。新安装后打开新终端，或按安装器输出的路径启动。
+
+默认 API 模型 ID 是 `chatgpt-web/gpt-6-tools-temp`；菜单显示名是 `GPT-6 (Web) · Tools · Temporary`。配置中使用前者，不把显示名称写成模型 ID；安装时还会核对该 key 的服务目录权限。
 
 Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限。目前新方案的实机证据来自 Linux；macOS、Windows 未完成本轮实机验收。Windows 使用对应的固定 [install.ps1 下载入口](https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.ps1)，每次维护都重新下载；已有 Windows server 的安全重载尚未覆盖。
 
@@ -50,7 +54,7 @@ Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限�
 (set -o pipefail; curl --http1.1 -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash)
 ```
 
-沿用已保存的 endpoint/key，取得最新正式发布包，修复本工具拥有的官方副本、`codex` 入口和模型目录。连接或目录变化时执行新的真实自检；失败终态会在这次重跑时重新自检，原失败记录保留。自检仍在进行时只返回原回合状态，不重复提交；结束后再重跑完成更新。入口或私有助手损坏也用这一命令恢复。
+沿用现有客户端和已保存的 endpoint/key，取得最新接入助手与模型目录，不重复安装 Codex。连接或目录变化时执行新的真实自检；失败终态在重跑时重新自检，原记录保留。自检仍在进行时只返回原回合状态，不重复提交。已有客户端损坏时明确报错，不擅自覆盖；私有接入助手或目录损坏仍用这个入口恢复。
 
 未变化且已通过的自检直接复用，避免重复花费。若要强制重测，可额外加 `--repair`；该参数仍不能重投尚未结束的回合。
 
@@ -83,7 +87,7 @@ Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限�
 - 安装器修改原生 `config.toml` 中的默认 provider/model、目录路径和必要功能设置，并先保留配置备份；旧 provider、项目设置、`auth.json` 和历史记录保留。新连接的默认模型为 `chatgpt-web/gpt-6-tools-temp`，可用 `--model ID` 选择。
 - 凭据、目录和恢复记录位于 `$CODEX_HOME/provider-connect/`，默认 `~/.codex/provider-connect/`。key 是受限明文文件，不是系统钥匙串；POSIX 目录 0700、文件 0600，原生 `auth.command` 读取对应凭据文件。旧连接引用的凭据不在更新时删除。
 - 自动化通过秘密存储注入 `CODEX_PROVIDER_API_KEY`。不静默绕过环境代理；需要改出口时由用户显式调整目标域名的 `NO_PROXY`。
-- 官方下载核验 npm 发布的 SHA512，并验证版本。显式 `CODEX_BINARY` 可指定兼容的官方原生二进制；默认不会从 PATH 沿用未知补丁版。
+- 首次下载核验 npm 发布的 SHA512；已有客户端只检查兼容性，不冒充已经过官方完整性核验。显式 `CODEX_BINARY` 或当前 PATH 的客户端优先；原入口和版本保持不变。
 - 旧 Python 接口保留供原调用方使用；新安装不创建 `codex-provider` / `codex-web` 日常命令。历史合同、恢复和卸载见[技术记录](docs/technical-notes.md)。
 
 Linux 三台真实用户 HOME 已完成安装及只读工具调用，新终端仍直接使用官方 `codex`；另以全新 HOME 验证首次下载、损坏修复和已有 server 重载。验收范围见[技术记录](docs/technical-notes.md)。

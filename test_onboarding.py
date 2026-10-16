@@ -456,7 +456,7 @@ class NativeIntegrationTests(unittest.TestCase):
             connector.native_catalog(self.connection, [])
         self.assertEqual(self.connection["catalog_file"], str(new))
 
-    def test_native_entry_is_official_binary_not_a_wrapper(self):
+    def test_explicit_existing_binary_does_not_replace_the_user_entry(self):
         binary = self.home / "official-codex"
         binary.write_bytes(b"fixture executable")
         binary.chmod(0o700)
@@ -466,11 +466,11 @@ class NativeIntegrationTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_BINARY": str(binary)}), \
                 mock.patch.object(connector, "client_version", return_value="0.162.1"), \
                 mock.patch.object(connector, "resolve_native_binary", return_value=binary):
-            self.assertEqual(connector.native_client(), [str(entry)])
-        self.assertTrue(entry.is_symlink())
-        self.assertEqual(entry.resolve(), binary)
+            self.assertEqual(connector.native_client(), [str(binary)])
+        self.assertFalse(entry.is_symlink())
+        self.assertEqual(entry.read_text(), "old entry")
         backups = list((connector.state_directory() / "backups").glob("codex-entry-*"))
-        self.assertEqual(backups[0].read_text(), "old entry")
+        self.assertEqual(backups, [])
         self.assertFalse((entry.parent / "codex-provider").exists())
 
     def test_repair_owned_damaged_catalog_before_starting_native_rpc(self):
@@ -507,6 +507,95 @@ class NativeIntegrationTests(unittest.TestCase):
             connector.native_path()
             connector.native_path()
         self.assertEqual((self.home / ".bashrc").read_text().count('export PATH='), 1)
+
+    def test_external_client_does_not_prepend_another_codex_directory(self):
+        rc = self.home / ".bashrc"
+        rc.write_text("# existing shell settings\n")
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash"}):
+            connector.native_path([str(self.home / "nvm/bin/codex")])
+        self.assertEqual(rc.read_text(), "# existing shell settings\n")
+        self.assertFalse((self.home / ".profile").exists())
+
+    def test_web_model_uses_api_slug_not_display_name(self):
+        expected = "chatgpt-web/gpt-6-tools-temp"
+        selected, _ = connector.select_model(self.connection, self.catalog, expected)
+        self.assertEqual(selected, expected)
+        display = next(m["display_name"] for m in json.loads(self.catalog.read_text())["models"]
+                       if m["slug"] == expected)
+        self.assertNotEqual(display, expected)
+        with self.assertRaises(ValueError):
+            connector.select_model(self.connection, self.catalog, display)
+
+
+class NativeClientReuseTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name)
+        environment = mock.patch.dict(os.environ, {"HOME": str(self.home),
+            "CODEX_HOME": str(self.home / ".codex"), "PATH": "/usr/bin:/bin"}, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def client(self, path, version="0.163.0"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#!/bin/sh\necho "codex-cli ' + version + '"\n')
+        path.chmod(0o700)
+        return path
+
+    def test_path_client_is_reused_without_downloading_or_replacing_entries(self):
+        binary = self.client(self.home / "nvm/bin/codex")
+        entry = self.home / ".local/bin/codex"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("preserve this existing launcher")
+        with mock.patch.object(connector.shutil, "which", return_value=str(binary)), \
+                mock.patch.object(connector, "official_client", side_effect=AssertionError("must not download")):
+            self.assertEqual(connector.native_client(), [str(binary)])
+        self.assertEqual(entry.read_text(), "preserve this existing launcher")
+
+    def test_registered_download_is_reused_when_path_is_empty(self):
+        binary = self.client(self.home / "downloaded/codex")
+        connector.private_json(connector.client_record_path(), {
+            "path": str(binary), "source": "official-npm", "version": "0.163.0"})
+        with mock.patch.object(connector.shutil, "which", return_value=None), \
+                mock.patch.object(connector, "official_client", side_effect=AssertionError("must not download")), \
+                mock.patch.object(connector, "resolve_native_binary", return_value=binary):
+            selected = connector.native_client()
+        self.assertEqual(Path(selected[0]).resolve(), binary)
+
+    def test_unregistered_cached_download_is_reused(self):
+        binary = self.client(connector.state_directory() / "official/0.163.0-linux-x64/package/vendor/x86_64-unknown-linux-musl/bin/codex")
+        with mock.patch.object(connector.shutil, "which", return_value=None), \
+                mock.patch.object(connector, "official_client", side_effect=AssertionError("must not download")), \
+                mock.patch.object(connector, "resolve_native_binary", return_value=binary):
+            selected = connector.native_client()
+        self.assertEqual(Path(selected[0]).resolve(), binary)
+
+    def test_standalone_download_is_reused(self):
+        binary = self.client(self.home / ".codex/packages/standalone/current/bin/codex")
+        with mock.patch.object(connector.shutil, "which", return_value=None), \
+                mock.patch.object(connector, "official_client", side_effect=AssertionError("must not download")), \
+                mock.patch.object(connector, "resolve_native_binary", return_value=binary):
+            selected = connector.native_client()
+        self.assertEqual(Path(selected[0]).resolve(), binary)
+
+    def test_incompatible_existing_client_is_not_silently_reinstalled(self):
+        binary = self.client(self.home / "bin/codex", "0.160.0")
+        with mock.patch.object(connector.shutil, "which", return_value=str(binary)), \
+                mock.patch.object(connector, "official_client", side_effect=AssertionError("must not download")):
+            with self.assertRaisesRegex(ValueError, "0.162.1"):
+                connector.native_client()
+        self.assertFalse((self.home / ".local/bin/codex").exists())
+
+    def test_only_absent_clients_trigger_one_download(self):
+        binary = self.client(self.home / "downloaded/codex", "0.162.1")
+        with mock.patch.object(connector.shutil, "which", return_value=None), \
+                mock.patch.object(connector, "official_client", return_value=[str(binary)]) as download, \
+                mock.patch.object(connector, "resolve_native_binary", return_value=binary):
+            first = connector.native_client()
+            second = connector.native_client()
+        self.assertEqual(first, second)
+        self.assertEqual(download.call_count, 1)
 
 
 class ReleaseBootstrapTests(unittest.TestCase):

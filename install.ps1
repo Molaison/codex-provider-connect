@@ -9,7 +9,7 @@ param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfig
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64-bit Windows is required.' }
 
-    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.9' }
+    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.10' }
     $Base = if ($env:CODEX_CONNECT_BASE) { $env:CODEX_CONNECT_BASE } elseif ($env:CODEX_CONNECT_REF) {
         "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release"
     } else { "https://github.com/Molaison/codex-provider-connect/releases/download/$Release" }
@@ -55,11 +55,20 @@ param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfig
         if ($ProviderUrl) { $Arguments += @('--url', $ProviderUrl) }
         & $Python -X utf8 $Helper @Arguments
         if ($LASTEXITCODE -ne 0) { throw 'Setup is not verified. Re-run the same fixed download command; no READY was issued.' }
-        $Current = [Environment]::GetEnvironmentVariable('Path', 'User')
-        if (($Current -split ';') -notcontains $Bin) { [Environment]::SetEnvironmentVariable('Path', "$Bin;$Current", 'User') }
-        $env:Path = "$Bin;$env:Path"
+        $ExistingCodex = Get-Command codex -ErrorAction SilentlyContinue
+        if (-not $ExistingCodex -and (Test-Path -LiteralPath $Launcher)) {
+            $Current = [Environment]::GetEnvironmentVariable('Path', 'User')
+            if (($Current -split ';') -notcontains $Bin) { [Environment]::SetEnvironmentVariable('Path', "$Bin;$Current", 'User') }
+            $env:Path = "$Bin;$env:Path"
+        }
         Write-Host "`n[READY] Native configuration, model menu, and real read-only tool check passed."
-        Write-Host "Start: & `"$Launcher`" (or codex in a new terminal)"
+        if (Get-Command codex -ErrorAction SilentlyContinue) {
+            Write-Host 'Start: codex (existing client preserved)'
+        } elseif (Test-Path -LiteralPath $Launcher) {
+            Write-Host "Start: & `"$Launcher`" (or codex in a new terminal)"
+        } else {
+            Write-Host 'Continue using the existing client specified by CODEX_BINARY; its entry was not replaced.'
+        }
         Write-Host 'Install, update, or repair: re-run the same fixed download command; add -Reconfigure to change the key.'
         Write-Host 'Passed checks are reused; add -Repair only to force a new check.'
 

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 main() {
-    local release="${CODEX_CONNECT_REF:-v0.1.9}"
+    local release="${CODEX_CONNECT_REF:-v0.1.10}"
     local base="https://github.com/Molaison/codex-provider-connect/releases/download/${release}"
     # Preserve explicit ref overrides, including older releases without assets.
     if [[ -n "${CODEX_CONNECT_REF:-}" ]]; then
@@ -64,11 +64,13 @@ main() {
     trap - EXIT
     python3 "$destination" _native-setup "$@"
     printf '\n[READY] 原生配置、模型菜单和真实只读工具自检通过。\n'
-    if [[ "$(command -v codex || true)" == "${HOME}/.local/bin/codex" ]]; then
+    if command -v codex >/dev/null 2>&1; then
         printf '以后直接运行：codex\n'
-    else
+    elif [[ -x "${HOME}/.local/bin/codex" ]]; then
         printf '启动：%s/.local/bin/codex\n' "$HOME"
-        printf '若 codex 指向其他版本，请将 ~/.local/bin 放到 PATH 前面并运行 hash -r。\n'
+        printf '新开终端后运行 codex；已有其他客户端时不强制修改 PATH。\n'
+    else
+        printf '继续使用 CODEX_BINARY 指定的现有客户端；未替换原入口。\n'
     fi
     printf '安装、更新或修复：重跑同一固定下载命令；更换 key 加 --reconfigure。\n'
     printf '已通过的自检会复用；需要强制重测时加 --repair。\n'

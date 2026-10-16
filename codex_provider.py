@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.9"
+VERSION = "0.1.10"
 OFFICIAL_CODEX_VERSION = "0.162.1"
 _CHECK_WORKERS = {}
 
@@ -151,13 +151,18 @@ def codex_binary():
         binary = shutil.which(override)
         if not binary:
             raise ValueError("CODEX_BINARY 指向的客户端不存在：%s" % override)
-        return [binary]
+        return codex_command(binary)
     installed = installed_client()
     if installed:
-        return [installed]
+        return codex_command(installed)
     binary = shutil.which("codex")
     if not binary:
         raise ValueError("请先安装官方 Codex，并确保 codex 在 PATH 中。")
+    return codex_command(binary)
+
+
+def codex_command(binary):
+    """Preserve the user's entry, including npm's Windows command wrapper."""
     if os.name == "nt" and Path(binary).suffix.lower() in (".cmd", ".bat"):
         # Invoke the official npm JS entry directly: cmd.exe would reinterpret TOML quotes.
         package = Path(binary).parent / "node_modules" / "@openai" / "codex"
@@ -906,39 +911,75 @@ def native_catalog(connection, binary):
 
 
 def native_client(direct=False):
-    """Install the official executable at codex, not a renamed maintenance wrapper."""
-    if os.environ.get("CODEX_BINARY"):
-        binary = codex_binary()
-    else:
-        binary = official_client(direct=direct)
-    version = client_version(binary)
-    if tuple(int(part) for part in version.split("-")[0].split(".")[:3]) < (0, 162, 1):
-        raise ValueError("原生接入需要 Codex 0.162.1 或更新版本；旧 server 不会被自动重启。")
+    """Reuse installed/downloaded Codex; download only when none is available."""
     entry = Path.home() / ".local/bin" / ("codex.exe" if os.name == "nt" else "codex")
+    preserve_entry = False
+    version = None
+    override = os.environ.get("CODEX_BINARY")
+    path = None if override else shutil.which("codex")
+    if override:
+        binary = codex_binary()
+        preserve_entry = True
+    elif path:
+        binary = codex_command(path)
+        preserve_entry = True
+    elif entry.exists() or entry.is_symlink():
+        binary = codex_command(str(entry))
+        preserve_entry = True
+    else:
+        standalone = state_directory().parent / "packages/standalone/current/bin" / entry.name
+        registered = installed_client()
+        candidates = [standalone] if standalone.is_file() else []
+        if registered:
+            candidates.append(Path(registered))
+        cache = state_directory() / "official"
+        downloaded = []
+        for path in cache.glob("*/package/vendor/*/bin/" + entry.name):
+            package = path.relative_to(cache).parts[0]
+            match = re.match(r"([0-9]+)\.([0-9]+)\.([0-9]+)-", package)
+            if match and ".unusable-" not in package:
+                downloaded.append((tuple(map(int, match.groups())), path))
+        candidates.extend(path for _, path in sorted(downloaded, reverse=True))
+        binary = None
+        for path in candidates:
+            try:
+                command = codex_command(str(path))
+                version = client_version(command)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                continue
+            binary = command
+            break
+        if binary is None:
+            if candidates:
+                raise ValueError("已发现 Codex 缓存但无法运行；未重新下载或覆盖，请用 CODEX_BINARY 指定可用客户端。")
+            binary = official_client(direct=direct)
+    try:
+        version = version or client_version(binary)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        raise ValueError("现有 Codex 无法运行；未重新下载或替换，请修复原安装或设置 CODEX_BINARY。") from None
+    if tuple(int(part) for part in version.split("-")[0].split(".")[:3]) < (0, 162, 1):
+        raise ValueError("原生接入需要 Codex 0.162.1 或更新版本；现有版本为 %s，未重新下载或替换，请先升级。" % version)
+    if preserve_entry:
+        print("复用现有 Codex %s，不重新安装。" % version, file=sys.stderr)
+        return binary
     entry.parent.mkdir(parents=True, exist_ok=True)
     source = resolve_native_binary(Path(binary[-1]).resolve())
-    if entry.resolve() != source:
-        if entry.exists() or entry.is_symlink():
-            backups = state_directory() / "backups"
-            secure_directory(backups)
-            backup = backups / ("codex-entry-" + secrets.token_hex(6))
-            if entry.is_symlink():
-                backup.symlink_to(os.readlink(entry))
-            else:
-                shutil.copy2(entry, backup)
-        pending = entry.with_name(".codex-" + secrets.token_hex(6))
-        if os.name == "nt":
-            shutil.copy2(source, pending)
-        else:
-            pending.symlink_to(source)
-        os.replace(pending, entry)
+    if os.name == "nt":
+        with source.open("rb") as original, entry.open("xb") as output:
+            shutil.copyfileobj(original, output)
+    else:
+        entry.symlink_to(source)  # Fail rather than replace a concurrently created entry.
     return [str(entry)]
 
 
-def native_path():
-    """Make the official executable available in subsequent interactive shells."""
+def native_path(binary=None):
+    """Expose our new entry, without shadowing an existing npm/system client."""
     if os.name == "nt":
         return
+    if binary is not None:
+        entry = Path.home() / ".local/bin/codex"
+        if len(binary) != 1 or Path(binary[0]).absolute() != entry.absolute():
+            return
     shell = Path(os.environ.get("SHELL", "/bin/bash")).name
     files = [".profile"]
     if shell == "bash":
@@ -1527,7 +1568,7 @@ def native_setup(arguments):
                                                  retry=args.repair or retry_failed or not same, native=True)))
     private_json(state_directory() / "native-installation.json", report)
     if report["status"] == "passed":
-        native_path()
+        native_path(binary)
     print(json.dumps(report, ensure_ascii=False))
     return 0 if report["status"] == "passed" else 2 if report["status"] == "running" else 1
 
