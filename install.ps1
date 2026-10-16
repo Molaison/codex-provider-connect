@@ -1,3 +1,4 @@
+# Published at releases/latest/download/install.ps1; payloads stay on one release.
 # codex-provider-connect: user-local native Windows bootstrap; no administrator needed.
 param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfigure, [switch]$RestartIfIdle)
 
@@ -8,8 +9,10 @@ param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfig
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64-bit Windows is required.' }
 
-    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.7' }
-    $Base = if ($env:CODEX_CONNECT_BASE) { $env:CODEX_CONNECT_BASE } else { "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release" }
+    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.8' }
+    $Base = if ($env:CODEX_CONNECT_BASE) { $env:CODEX_CONNECT_BASE } elseif ($env:CODEX_CONNECT_REF) {
+        "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release"
+    } else { "https://github.com/Molaison/codex-provider-connect/releases/download/$Release" }
     $Root = Join-Path $env:LOCALAPPDATA 'codex-provider-connect'
     $Bin = Join-Path $env:USERPROFILE '.local\bin'
     $Launcher = Join-Path $Bin 'codex.exe'
@@ -51,13 +54,14 @@ param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfig
         if ($DoRestartIfIdle) { $Arguments += '--restart-if-idle' }
         if ($ProviderUrl) { $Arguments += @('--url', $ProviderUrl) }
         & $Python -X utf8 $Helper @Arguments
-        if ($LASTEXITCODE -ne 0) { throw 'Setup is not verified. Re-run this installer with -Repair; no READY was issued.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Setup is not verified. Re-run the same fixed download command; no READY was issued.' }
         $Current = [Environment]::GetEnvironmentVariable('Path', 'User')
         if (($Current -split ';') -notcontains $Bin) { [Environment]::SetEnvironmentVariable('Path', "$Bin;$Current", 'User') }
         $env:Path = "$Bin;$env:Path"
         Write-Host "`n[READY] Native configuration, model menu, and real read-only tool check passed."
         Write-Host "Start: & `"$Launcher`" (or codex in a new terminal)"
-        Write-Host 'Repair: re-run this installer with -Repair; add -Reconfigure to change the key.'
+        Write-Host 'Install, update, or repair: re-run the same fixed download command; add -Reconfigure to change the key.'
+        Write-Host 'Passed checks are reused; add -Repair only to force a new check.'
 
     }
     finally {

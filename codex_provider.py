@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 OFFICIAL_CODEX_VERSION = "0.162.1"
 _CHECK_WORKERS = {}
 
@@ -1368,13 +1368,13 @@ def native_check_report(result):
     """Give native users the installer action, not an uninstalled legacy CLI."""
     hints = {
         "CHECK_PENDING": "原自检仍在运行或终态待恢复；重跑同一安装命令查询同一回合，不会重复提交。",
-        "CHECK_CONNECTION_CHANGED": "旧自检不能代表当前连接；重跑同一安装命令并加 --repair 验证新连接。",
-        "OUTPUT_MISMATCH": "工具读取成功，但模型未完整返回文件内容；重跑同一安装命令并加 --repair，仍失败请提供 native-installation.json。",
-        "CLIENT": "客户端不可用；重跑同一安装命令并加 --repair。显式设置 CODEX_BINARY 时先修正该路径。",
+        "CHECK_CONNECTION_CHANGED": "旧自检不能代表当前连接；重跑同一安装命令验证新连接。",
+        "OUTPUT_MISMATCH": "工具读取成功，但模型未完整返回文件内容；重跑同一安装命令，仍失败请提供 native-installation.json。",
+        "CLIENT": "客户端不可用；重跑同一安装命令。显式设置 CODEX_BINARY 时先修正该路径。",
         "CONFIG": "连接信息不完整；重跑同一安装命令并加 --reconfigure，重新输入 endpoint 和 key。",
         "AUTH": "密钥被拒绝；重跑同一安装命令并加 --reconfigure，重新输入自己的 key。",
-        "BUSY": "上游限流；稍后重跑同一安装命令并加 --repair。",
-        "NETWORK": "检查 endpoint、VPN/代理与证书；不要关闭 TLS 校验。修正后重跑同一安装命令并加 --repair。",
+        "BUSY": "上游限流；稍后重跑同一安装命令。",
+        "NETWORK": "检查 endpoint、VPN/代理与证书；不要关闭 TLS 校验。修正后重跑同一安装命令。",
         "MODEL_CHECK": "真实工具自检未通过；请将私有目录中的脱敏 native-installation.json 提供给维护者。",
     }
     return dict(result, **({"hint": hints[result["code"]]} if result["code"] in hints else {}))
@@ -1387,7 +1387,7 @@ def native_setup(arguments):
     parser.add_argument("--catalog-file", help="维护者提供的本地 Codex model catalog；默认使用安装包内维护的目录")
     parser.add_argument("--model")
     parser.add_argument("--reconfigure", action="store_true")
-    parser.add_argument("--repair", action="store_true", help="旧自检终止后再测一次；未终止时只恢复原回合")
+    parser.add_argument("--repair", action="store_true", help="强制重做已通过的自检；失败终态默认重试，未终止时只恢复原回合")
     parser.add_argument("--restart-if-idle", action="store_true", help="明确允许需要刷新配置的本地 server 只在空闲时用官方命令重启")
     parser.add_argument("--skip-check", action="store_true", help="只配置，返回2/NOT_VERIFIED，不报成功")
     parser.add_argument("--check", action="store_true", help="默认已执行真实只读工具自检")
@@ -1395,6 +1395,7 @@ def native_setup(arguments):
     if args.skip_check and args.check:
         parser.error("--skip-check 与 --check 不能同时使用")
     previous = saved_connection()
+    retry_failed = False
     # Never rotate a credential or route underneath an unfinished accepted check.
     active = state_directory() / "checks/current.json"
     if active.exists():
@@ -1405,6 +1406,7 @@ def native_setup(arguments):
             private_json(state_directory() / "native-installation.json", result)
             print(json.dumps(result, ensure_ascii=False))
             return 2
+        retry_failed = result["status"] == "failed"
     binary = native_client()
     options = []
     for name in ("url", "provider"):
@@ -1435,7 +1437,7 @@ def native_setup(arguments):
         return 1
     integration = native_configure(binary, connection, model)
     private_json(state_directory() / "connection.json", connection)
-    report = {"integration": "native", "client_version": client_version(binary), **integration}
+    report = {"integration": "native", "installer_version": VERSION, "client_version": client_version(binary), **integration}
     if integration["restart_required"]:
         restarted, code, hint = native_restart(binary, integration, confirmed=args.restart_if_idle)
         if not restarted:
@@ -1457,7 +1459,7 @@ def native_setup(arguments):
         return 2
     print("正在通过已保存的原生 codex 配置执行只读工具自检，最多等待10分钟；超时重跑同一安装命令查询，不重投。", file=sys.stderr)
     report.update(native_check_report(model_check(binary, connection, catalog, model,
-                                                 retry=args.repair or not same, native=True)))
+                                                 retry=args.repair or retry_failed or not same, native=True)))
     private_json(state_directory() / "native-installation.json", report)
     if report["status"] == "passed":
         native_path()

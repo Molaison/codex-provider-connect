@@ -2,6 +2,16 @@
 
 本页保留 README 精简前的操作细节、限制说明、卸载步骤和历史验收记录。
 
+## v0.1.8：固定入口安装、更新和修复
+
+用户入口为 `https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh`，Windows 对应 `install.ps1`。GitHub 选择最新正式 release；脚本自身携带该版本号，助手和 `model_catalog.json` 从同一 release 的附件下载，不执行主分支代码、不临时拼出下一版本。用户每次重新下载执行，无须修改版本号。下载不完整或助手版本不符时，保留已安装的助手和目录，返回失败。
+
+重跑默认修复自有文件，沿用 endpoint/key，并更新到维护者正式发布的目录。目录/连接变化需要新的真实自检；失败终态在用户重跑时重试一次，原记录保留；未结束的回合只恢复状态，结束后再重跑应用更新。没有变化且已通过时复用证据；`--repair` 保留为强制重做已通过自检的兼容选项。旧 Python setup/repair API 的终态重试合同不变。
+
+已有 server 的更新仍由下面的原生控制接口与官方 restart 完成：忙时保留，空闲询问，确认后复查，再检查新身份、配置和菜单。同 ID 元数据变化也需重载，不能把更新文件或下载成功当成运行中 server 已更新。不会在每次 `codex` 启动时联网或自动重启。
+
+本轮 20 项定向合同测试通过，覆盖 latest 在下载中变化时不混包、下载失败保留旧文件、同入口默认修复及未终态不重投。ty3 的全新隔离 HOME 复用已验官方 0.162.1，以本地 release/model fixture 模拟两个版本：同一 URL 更新，忙时不重启、未确认不重启，真实终端确认后同 ID 元数据刷新；完全损坏的自有助手、目录和 `codex` 入口也由同一命令恢复。全过程 10.58 秒，隔离 daemon 已停止。证据为项目 rev24 的 `60_fixed_entry_acceptance.json`；fixture 未请求真实上游模型，真实使用证据沿用下方 v0.1.7 三机结果。
+
 ## v0.1.7：原生 codex 接入（2026-10-16）
 
 当前安装入口配置原生 `codex`，不再安装 `codex-provider` 或 `codex-web` 日常入口。固定下载官方未修改的 0.162.1，核验 npm SHA512 和客户端版本；`~/.local/bin/codex` 直接指向官方二进制。维护助手和恢复状态留在私有目录，不参与每次启动。
@@ -14,7 +24,7 @@
 
 `GET /models` 仅预检网络、key 和所选模型权限，接受标准模型列表，不将响应变成 catalog。不关闭 TLS，不静默改代理或出口。随后通过已保存的原生配置执行随机文件读取，要求命令成功、文件内容完整匹配、原生回合成功和进程 exit 0，才报告 `READY`。`--skip-check` 返回 2 / `NOT_VERIFIED`。
 
-更新或修复重跑 README 的同一安装器并加 `--repair`；换连接加 `--reconfigure`。未完成自检只恢复原 owner，不新投；终态后明确修复可新测。前台最多等待 10 分钟，超时保留运行 owner。脱敏结果为 `provider-connect/native-installation.json`，原始事件与凭据不应上传。旧 Python API 继续保留原合同，以下旧入口说明只适用于历史调用方。
+v0.1.7 更新或修复需重跑同一安装器并加 `--repair`；v0.1.8 的默认修复见页首。换连接加 `--reconfigure`。未完成自检只恢复原 owner，不新投；终态后可新测。前台最多等待 10 分钟，超时保留运行 owner。脱敏结果为 `provider-connect/native-installation.json`，原始事件与凭据不应上传。旧 Python API 继续保留原合同，以下旧入口说明只适用于历史调用方。
 
 TY 与 h100 的新原生入口已在隔离 HOME 完成真实工具验收；h100 包含入口和目录损坏后的同一 HOME 修复。ty3 的全新 HOME 首次下载、已有 daemon 的忙碌保护、空闲确认重启和普通 TUI 实测均通过；同 ID 元数据成功重载，普通 TUI 连接同一新 daemon 完成真实读取，80.21 秒。新方案证据为项目 rev24 的 runs/49 与 runs/51，不能用下方旧独立入口结果代替。macOS、Windows 未做本轮实机验收，Windows 常驻 server 重载未覆盖。
 
@@ -144,8 +154,10 @@ v0.1.0 的真实空白配置验收（安装器与平台启动机制在 v0.1.1 �
 
 两端都在原生 model/list 中显示了 DeepSeek，Windows 同时显示 gpt-6.1-sol。数量来自各次 Provider 返回值，并非固定名单；隐藏条目保留但不强行展示。已验证启动自动刷新、不覆盖现有 Codex 配置，以及错误密钥不覆盖已保存连接。Windows 从 GitHub 安装并实际使用私有 Python 和原生 npm Codex，非 WSL 模拟。macOS 共用 POSIX 入口，尚未实机验收。
 
-版本号同时位于 `install.sh`、`install.ps1` 和 `codex_provider.py`。发布必须先获授权、完成真实空白客户端验收，再提交对应版本并使用 `just release <版本号>`。v0.1.7 已取得发布授权并完成上述 Linux 验收，使用同一发布入口交付。
-标签会固化入口脚本自带的默认版本；两个安装器在下载 `codex_provider.py` 后校验该文件里的 `VERSION` 与入口版本一致，不一致就中止而不是静默装成旧版本（`CODEX_CONNECT_REF=main` 时跳过该校验）。
-维护者可用 `CODEX_CONNECT_REF=main` 验收 GitHub 主分支入口；默认用户入口固定在发布标签。
-修改维护目录后必须发布新版本，并给用户新版安装链接；旧标签的 `--repair` 只恢复旧目录。已有 server 仍需经过任务检查及确认重启，不能以写入文件代替更新完成。
-验收应从空白 HOME/CODEX_HOME 出发，用真实 Provider 和原生 `app-server model/list` 检查菜单，并以一次真实只读工具回合完成验收；目录可见不能替代实际可用。
+版本号同时位于 `install.sh`、`install.ps1` 和 `codex_provider.py`，只由维护者修改。发布必须先获授权、完成对应验收并提交，再使用 `just release <版本号>`。该入口检查三处版本一致及工作区已提交，推送后创建 draft，一次上传 `install.sh`、`install.ps1`、`codex_provider.py`、`model_catalog.json` 四份附件，最后取消 draft 并标为 latest。上传失败时 draft 不对普通用户生效，原 latest 保持可用。
+
+若附件上传中断，维护者在核对该 draft 对应提交后，用 `gh release upload v<版本号> install.sh install.ps1 codex_provider.py model_catalog.json --clobber` 补齐，再用 `gh release edit v<版本号> --draft=false --latest` 完成同一发布，不删改现有正式版本。
+
+两个安装器校验下载助手里的 `VERSION` 与本次入口版本一致；默认从同版本 release 附件取完整载荷。显式 `CODEX_CONNECT_REF` 继续走原 raw ref 路线，兼容旧标签和维护者 `main` 验收；`CODEX_CONNECT_BASE` 仍支持隔离文件/HTTP fixture。普通用户不设置这些变量。不要修改已发布附件来更新模型，维护目录变化应发布新版；固定 latest 下载链接不变。旧标签或旧本地脚本只恢复其原版本。
+
+真实模型调用与新版本交付机制分开验收：v0.1.7 三机及原生 server 的真实工具证据仍有效；固定入口需另外覆盖同一 URL 跨版本、下载中 latest 切换不混包、失败保留旧安装、损坏修复、已有官方 server 同 ID 元数据重载。不能把模型 fixture 当成新的真实上游通过。

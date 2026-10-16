@@ -411,6 +411,34 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertTrue(check.call_args.kwargs["retry"])
         self.assertTrue(check.call_args.kwargs["native"])
 
+    def test_native_rerun_retries_failed_terminal_check_without_flag_but_reuses_success(self):
+        with mock.patch.object(connector, "native_client", return_value=["fixture-codex"]), \
+                mock.patch.object(connector, "client_version", return_value="0.162.1"), \
+                mock.patch.object(connector, "native_preflight", return_value={"status": "network_ok"}), \
+                mock.patch.object(connector, "NativeRPC", self.rpc_factory()), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(connector.native_setup(["--url", self.connection["url"], "--skip-check"]), 2)
+            connector.private_json(connector.state_directory() / "checks/current.json", {"directory": str(self.home / "old-check")})
+            with mock.patch.object(connector, "check_result", return_value={"status": "failed", "code": "UPSTREAM_COMPAT"}), \
+                    mock.patch.object(connector, "model_check", return_value={"status": "passed", "code": "READY"}) as check:
+                self.assertEqual(connector.native_setup([]), 0)
+                self.assertTrue(check.call_args.kwargs["retry"])
+            with mock.patch.object(connector, "check_result", return_value={"status": "passed", "code": "READY"}), \
+                    mock.patch.object(connector, "model_check", return_value={"status": "passed", "code": "READY"}) as check:
+                self.assertEqual(connector.native_setup([]), 0)
+                self.assertFalse(check.call_args.kwargs["retry"])
+                self.assertEqual(connector.native_setup(["--repair"]), 0)
+                self.assertTrue(check.call_args.kwargs["retry"])
+
+    def test_native_rerun_preserves_pending_check_before_changing_client_or_server(self):
+        connector.private_json(connector.state_directory() / "checks/current.json", {"directory": str(self.home / "pending-check")})
+        with mock.patch.object(connector, "check_result", return_value={"status": "running", "code": "CHECK_PENDING"}), \
+                mock.patch.object(connector, "native_client", side_effect=AssertionError("must not replace client")), \
+                mock.patch.object(connector, "native_configure", side_effect=AssertionError("must not mutate server")), \
+                mock.patch.object(connector, "model_check", side_effect=AssertionError("must not resubmit")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(connector.native_setup(["--repair", "--restart-if-idle"]), 2)
+
     def test_catalog_updates_use_immutable_paths_and_do_not_fetch_upstream(self):
         old = self.catalog.read_bytes()
         with mock.patch.object(connector.urllib.request, "urlopen", side_effect=AssertionError("no upstream sync")):
@@ -464,7 +492,7 @@ class NativeIntegrationTests(unittest.TestCase):
         source = self.home / "source"
         source.mkdir()
         (source / "model_catalog.json").write_text('{"models":[{"slug":"fixture"}]}')
-        (source / "codex_provider.py").write_text('''# codex-provider-connect\nVERSION = "0.1.7"\nimport sys\nassert sys.argv[1] == "_native-setup"\nassert "--url" in sys.argv\nprint("fixture setup passed")\n''')
+        (source / "codex_provider.py").write_text('''# codex-provider-connect\nVERSION = "%s"\nimport sys\nassert sys.argv[1] == "_native-setup"\nassert "--url" in sys.argv\nprint("fixture setup passed")\n''' % connector.VERSION)
         env = dict(os.environ, PATH=os.environ.get("PATH", "/usr/bin:/bin"), CODEX_CONNECT_BASE=source.as_uri())
         result = subprocess.run(["bash", str(ROOT / "install.sh"), "--url", self.connection["url"]],
                                 env=env, capture_output=True, text=True, timeout=15)
@@ -479,3 +507,112 @@ class NativeIntegrationTests(unittest.TestCase):
             connector.native_path()
             connector.native_path()
         self.assertEqual((self.home / ".bashrc").read_text().count('export PATH='), 1)
+
+
+class ReleaseBootstrapTests(unittest.TestCase):
+    """Exercise one unchanged latest URL; only release hosting/setup are fixtures."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name)
+        self.root = self.home / ".codex/provider-connect"
+        self.env = {"HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex"),
+                    "PATH": os.environ.get("PATH", os.defpath), "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+        self.latest = "v" + connector.VERSION
+        self.future = "v0.1.9"
+        self.requests = []
+        self.missing_catalog = False
+        self.mismatch = False
+        self.flip_during_download = False
+        case = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                case.requests.append(self.path)
+                if self.path == "/releases/latest/download/install.sh":
+                    source = (ROOT / "install.sh").read_text().replace("v" + connector.VERSION, case.latest)
+                    body = source.replace("https://github.com/Molaison/codex-provider-connect", case.base).encode()
+                else:
+                    parts = self.path.split("/")
+                    if len(parts) != 5 or parts[1:3] != ["releases", "download"]:
+                        self.send_error(404)
+                        return
+                    tag, filename = parts[3:]
+                    if filename == "codex_provider.py":
+                        version = "0.0.0" if case.mismatch else tag[1:]
+                        body = ('''# codex-provider-connect; fixture setup only, no real model\nVERSION = "%s"\nimport json,sys\nfrom pathlib import Path\nassert sys.argv[1] == "_native-setup"\nroot=Path(__file__).parent\nassert json.loads((root/"model_catalog.json").read_text())["models"][0]["display_name"] == "release-" + VERSION\nprint("fixture setup passed")\n''' % version).encode()
+                        if case.flip_during_download:
+                            case.latest = case.future
+                    elif filename == "model_catalog.json" and not case.missing_catalog:
+                        body = json.dumps({"models": [{"slug": MODEL, "display_name": "release-" + tag[1:]}]}).encode()
+                    else:
+                        self.send_error(404)
+                        return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = "http://127.0.0.1:%s" % self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def install(self):
+        # This command is identical before/after a new release. No ref override.
+        return subprocess.run(["bash", "-o", "pipefail", "-c",
+            'curl -fsSL "$1/releases/latest/download/install.sh" | bash', "fixture", self.base],
+            env=self.env, capture_output=True, text=True, timeout=20)
+
+    def test_same_latest_url_updates_without_mixing_releases_when_latest_changes_mid_download(self):
+        self.flip_during_download = True
+        installed = self.install()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertIn('VERSION = "' + connector.VERSION + '"', (self.root / "codex_provider.py").read_text())
+        updated = self.install()
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        self.assertIn('VERSION = "0.1.9"', (self.root / "codex_provider.py").read_text())
+        self.assertEqual(self.requests, ["/releases/latest/download/install.sh",
+            "/releases/download/v" + connector.VERSION + "/codex_provider.py",
+            "/releases/download/v" + connector.VERSION + "/model_catalog.json",
+            "/releases/latest/download/install.sh", "/releases/download/v0.1.9/codex_provider.py",
+            "/releases/download/v0.1.9/model_catalog.json"])
+
+    def test_missing_payload_or_version_mismatch_never_replaces_working_installation(self):
+        self.assertEqual(self.install().returncode, 0)
+        previous = {name: (self.root / name).read_bytes() for name in ("codex_provider.py", "model_catalog.json")}
+        for failure in ("missing_catalog", "mismatch"):
+            with self.subTest(failure=failure):
+                setattr(self, failure, True)
+                failed = self.install()
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertNotIn("[READY]", failed.stdout)
+                for name, content in previous.items():
+                    self.assertEqual((self.root / name).read_bytes(), content)
+                setattr(self, failure, False)
+
+    def test_same_entry_repairs_empty_owned_helper_but_preserves_unrelated_file(self):
+        self.root.mkdir(parents=True)
+        helper = self.root / "codex_provider.py"
+        helper.write_text("unrelated file")
+        refused = self.install()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(helper.read_text(), "unrelated file")
+        helper.write_text("")
+        (self.root / "connection.json").write_text('{"integration":"native"}')
+        repaired = self.install()
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        backups = list((self.root / "backups").glob("damaged-helper.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"")
+
+    def test_failed_latest_download_is_not_success(self):
+        result = subprocess.run(["bash", "-o", "pipefail", "-c", 'curl -fsSL "$1/missing" | bash', "fixture", self.base],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("[READY]", result.stdout)

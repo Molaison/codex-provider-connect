@@ -4,13 +4,15 @@
 
 ## 安装后直接用 `codex`
 
-复制下面的 **v0.1.7** 安装命令，无需克隆仓库：
+使用这个**固定入口**，无需克隆仓库或填写版本号：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.7/install.sh | bash -s -- --url https://your-provider.example/v1
+(set -o pipefail; curl -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash -s -- --url https://your-provider.example/v1)
 ```
 
 将地址替换为维护者提供的 endpoint，按提示隐藏输入自己的 key。不要把 key 写进命令行。
+
+入口始终选择最新正式发布版。每次安装的助手和目录都锁定在同一发布包，不混用不同版本；下载失败不会覆盖已有助手和目录。命令中的 `pipefail` 让入口下载失败也返回非零，避免空下载被误当成安装成功。
 
 安装器会准备固定版本的**官方 Codex 0.162.1**，检查地址和密钥权限，写入原生配置，再用只读工具读取随机文件并核对完整回答。无需先装 Codex、npm 或手动编辑 TOML。
 
@@ -24,7 +26,7 @@ codex
 
 在原生 `/model` 菜单选择模型；`codex resume` 等官方命令照常使用。`~/.local/bin/codex` 直接指向官方可执行文件，不是包了一层的启动器。当前终端尚未刷新 PATH 时，可直接运行 `~/.local/bin/codex`。
 
-Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限。目前新方案的实机证据来自 Linux；macOS、Windows 未完成本轮实机验收。Windows 入口为 `install.ps1`，已有 Windows server 的安全重载尚未覆盖。
+Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限。目前新方案的实机证据来自 Linux；macOS、Windows 未完成本轮实机验收。Windows 使用对应的固定 [install.ps1 下载入口](https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.ps1)，每次维护都重新下载；已有 Windows server 的安全重载尚未覆盖。
 
 ## 已有 server：忙时保留，空闲确认后重启
 
@@ -38,21 +40,23 @@ Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限�
 
 ## 更新和修复：重跑同一安装器
 
-重跑同一入口，加上 `--repair`：
+安装、更新模型和修复都重跑同一个入口，**不用改版本号，也不用加参数**：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.7/install.sh | bash -s -- --repair
+(set -o pipefail; curl -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash)
 ```
 
-沿用已保存的 endpoint/key，修复本工具拥有的官方副本、`codex` 入口和模型目录，再执行一次真实自检。自检仍在进行时，只返回原回合状态，不重复提交。入口或私有助手损坏也用这一命令恢复。
+沿用已保存的 endpoint/key，取得最新正式发布包，修复本工具拥有的官方副本、`codex` 入口和模型目录。连接或目录变化时执行新的真实自检；失败终态会在这次重跑时重新自检，原失败记录保留。自检仍在进行时只返回原回合状态，不重复提交；结束后再重跑完成更新。入口或私有助手损坏也用这一命令恢复。
+
+未变化且已通过的自检直接复用，避免重复花费。若要强制重测，可额外加 `--repair`；该参数仍不能重投尚未结束的回合。
 
 换地址或 key 时：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.1.7/install.sh | bash -s -- --repair --reconfigure
+(set -o pipefail; curl -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash -s -- --reconfigure)
 ```
 
-模型目录由维护者直接维护在安装包的 `model_catalog.json`，通过官方 `model_catalog_json` 加载。**不依赖上游同步元数据，也不在每次启动时联网刷新目录。** 新模型随维护者提供的新版本安装包交付；重跑旧版本只恢复该版本的目录，不会假装升级到最新目录。目录更新采用新文件路径；已有 server 必须完成上述重载，即使模型 ID 没变、只有能力或文案改变。
+模型目录由维护者直接维护在安装包的 `model_catalog.json`，通过官方 `model_catalog_json` 加载。**不依赖上游同步元数据，也不在每次启动时联网刷新目录。** 维护者发布新版后，重跑上面的固定入口就能更新。目录更新采用新文件路径；已有 server 必须完成上述重载，即使模型 ID 没变、只有能力或文案改变。保留旧版安装器只用于回退，不要用旧本地脚本代替固定下载入口。
 
 | 结果 | 下一步 |
 | --- | --- |
@@ -63,8 +67,8 @@ curl -fsSL https://raw.githubusercontent.com/Molaison/codex-provider-connect/v0.
 | `SERVER_BUSY` | 等任务结束后重跑；不必停止正在用的 server。 |
 | `SERVER_RESTART_REQUIRED` | 重跑并确认空闲重启；自动化显式加 `--restart-if-idle`。 |
 | `CHECK_PENDING` | 重跑同一安装命令查询原回合，不另开自检。 |
-| `UPSTREAM_COMPAT` | 将脱敏报告交给维护者修复服务端；重装客户端无效，修复后再加 `--repair`。 |
-| `OUTPUT_MISMATCH` / 其他真实调用失败 | 同一命令加 `--repair`；仍失败时将脱敏的 `native-installation.json` 给维护者。 |
+| `UPSTREAM_COMPAT` | 将脱敏报告交给维护者修复服务端；重装客户端无效，修复后重跑同一命令。 |
+| `OUTPUT_MISMATCH` / 其他真实调用失败 | 重跑同一命令；仍失败时将脱敏的 `native-installation.json` 给维护者。 |
 | `NOT_VERIFIED` | 只配置、未验收。去掉 `--skip-check` 后重跑。 |
 
 报告位于 `${CODEX_HOME:-$HOME/.codex}/provider-connect/native-installation.json`。不要上传整个配置目录、key 文件或原始日志。
