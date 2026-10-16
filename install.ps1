@@ -1,24 +1,20 @@
 # codex-provider-connect: user-local native Windows bootstrap; no administrator needed.
-param([string]$Url = $env:CODEX_PROVIDER_URL)
+param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfigure, [switch]$RestartIfIdle)
 
 & {
-    param([string]$ProviderUrl)
+    param([string]$ProviderUrl, [bool]$DoRepair, [bool]$DoReconfigure, [bool]$DoRestartIfIdle)
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64-bit Windows is required.' }
-    if (-not (Get-Command codex -ErrorAction SilentlyContinue)) { throw 'Install official Codex first and make codex available in PATH.' }
 
-    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.5' }
-    $Base = "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release"
+    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.7' }
+    $Base = if ($env:CODEX_CONNECT_BASE) { $env:CODEX_CONNECT_BASE } else { "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release" }
     $Root = Join-Path $env:LOCALAPPDATA 'codex-provider-connect'
     $Bin = Join-Path $env:USERPROFILE '.local\bin'
-    $Launcher = Join-Path $Bin 'codex-provider.cmd'
+    $Launcher = Join-Path $Bin 'codex.exe'
     $Python = Join-Path $Root 'python\python.exe'
     $Helper = Join-Path $Root 'codex_provider.py'
-    if ((Test-Path -LiteralPath $Launcher) -and -not ((Get-Content -Raw -LiteralPath $Launcher) -match 'codex-provider-connect')) {
-        throw "Refusing to overwrite an unrelated file: $Launcher"
-    }
     New-Item -ItemType Directory -Force -Path $Root, $Bin | Out-Null
     $Temporary = Join-Path ([IO.Path]::GetTempPath()) ('codex-provider-install-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $Temporary | Out-Null
@@ -43,18 +39,28 @@ param([string]$Url = $env:CODEX_PROVIDER_URL)
                 throw "Downloaded codex_provider.py does not match $Release; nothing was installed."
             }
         }
+        $Catalog = Join-Path $Temporary 'model_catalog.json'
+        Invoke-WebRequest -UseBasicParsing -Uri "$Base/model_catalog.json" -OutFile $Catalog
+        $Parsed = Get-Content -Raw -LiteralPath $Catalog | ConvertFrom-Json
+        if (-not $Parsed.models -or $Parsed.models.Count -eq 0) { throw 'Invalid model catalog; existing setup was not replaced.' }
+        Move-Item -Force -LiteralPath $Catalog -Destination (Join-Path $Root 'model_catalog.json')
         Move-Item -Force -LiteralPath $Download -Destination $Helper
-        $Lines = @('@echo off', 'rem codex-provider-connect', 'setlocal', 'set "PYTHONUTF8=1"', '"%LOCALAPPDATA%\codex-provider-connect\python\python.exe" "%LOCALAPPDATA%\codex-provider-connect\codex_provider.py" %*', 'exit /b %errorlevel%')
-        [IO.File]::WriteAllLines($Launcher, $Lines, [Text.Encoding]::ASCII)
-        $Arguments = @('configure')
+        $Arguments = @('_native-setup')
+        if ($DoRepair) { $Arguments += '--repair' }
+        if ($DoReconfigure) { $Arguments += '--reconfigure' }
+        if ($DoRestartIfIdle) { $Arguments += '--restart-if-idle' }
         if ($ProviderUrl) { $Arguments += @('--url', $ProviderUrl) }
         & $Python -X utf8 $Helper @Arguments
-        if ($LASTEXITCODE -ne 0) { throw 'Provider configuration failed; existing Codex configuration was not changed.' }
-        Write-Host "`nStart official Codex with automatic catalog refresh:"
-        Write-Host "& `"$Launcher`""
-        Write-Host 'No system PATH change and no existing session restart.'
+        if ($LASTEXITCODE -ne 0) { throw 'Setup is not verified. Re-run this installer with -Repair; no READY was issued.' }
+        $Current = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if (($Current -split ';') -notcontains $Bin) { [Environment]::SetEnvironmentVariable('Path', "$Bin;$Current", 'User') }
+        $env:Path = "$Bin;$env:Path"
+        Write-Host "`n[READY] Native configuration, model menu, and real read-only tool check passed."
+        Write-Host "Start: & `"$Launcher`" (or codex in a new terminal)"
+        Write-Host 'Repair: re-run this installer with -Repair; add -Reconfigure to change the key.'
+
     }
     finally {
         Remove-Item -LiteralPath $Temporary -Recurse -Force
     }
-} $Url
+} $Url ([bool]$Repair) ([bool]$Reconfigure) ([bool]$RestartIfIdle)
