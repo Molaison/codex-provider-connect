@@ -9,7 +9,7 @@ param([string]$Url = $env:CODEX_PROVIDER_URL, [switch]$Repair, [switch]$Reconfig
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     if (-not [Environment]::Is64BitOperatingSystem) { throw '64-bit Windows is required.' }
 
-    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.8' }
+    $Release = if ($env:CODEX_CONNECT_REF) { $env:CODEX_CONNECT_REF } else { 'v0.1.9' }
     $Base = if ($env:CODEX_CONNECT_BASE) { $env:CODEX_CONNECT_BASE } elseif ($env:CODEX_CONNECT_REF) {
         "https://raw.githubusercontent.com/Molaison/codex-provider-connect/$Release"
     } else { "https://github.com/Molaison/codex-provider-connect/releases/download/$Release" }

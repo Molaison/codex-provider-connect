@@ -32,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 OFFICIAL_CODEX_VERSION = "0.162.1"
 _CHECK_WORKERS = {}
 
@@ -362,17 +362,21 @@ def _scalar(raw):
 
 
 def _value(raw):
-    """最小解析里的值：数组取元素，其余去引号。"""
+    """最小解析里的值：保留鉴权超时等数字类型。"""
     raw = raw.strip()
     if raw.startswith("[") and raw.endswith("]"):
         return [_scalar(item) for item in raw[1:-1].split(",") if item.strip()]
+    if re.fullmatch(r"[+-]?[0-9]+", raw):
+        return int(raw)
+    if raw in ("true", "false"):
+        return raw == "true"
     return _scalar(raw)
 
 
 def _toml_tables(text):
     """没有 tomllib 时的最小解析：只取 [表] 下的 键 = 值。"""
-    tables = {}
-    current = None
+    tables = {"": {}}
+    current = ""
     for line in text.splitlines():
         line = _strip_comment(line).strip()
         if not line:
@@ -387,32 +391,46 @@ def _toml_tables(text):
     return tables
 
 
-def config_provider(name):
-    """读取 config.toml 里 model_providers.<name> 的 base_url 与凭据。"""
+def provider_settings():
+    """Read provider settings, including the active provider on Python 3.8-3.10."""
     path = config_path()
     if not path.is_file():
-        raise ValueError("找不到 %s；--provider 需要一份已有的 Codex 配置。" % path)
+        return {}
     text = path.read_text(encoding="utf-8")
     if tomllib is not None:
         try:
-            block = tomllib.loads(text).get("model_providers", {}).get(name)
+            return tomllib.loads(text)
         except tomllib.TOMLDecodeError as error:
             raise ValueError("%s 不是合法 TOML：%s" % (path, error)) from None
-        if not isinstance(block, dict):
-            block = None
-        auth = block.get("auth") if isinstance(block, dict) else None
-    else:  # pragma: no cover - 老解释器路径
-        tables = _toml_tables(text)
-        raw = tables.get("model_providers." + name)
-        block = {key: _value(value) for key, value in raw.items()} if raw else None
-        auth_raw = tables.get("model_providers." + name + ".auth")
-        auth = {key: _value(value) for key, value in auth_raw.items()} if auth_raw else None
+    tables = _toml_tables(text)
+    settings = {key: _value(value) for key, value in tables[""].items()}
+    providers = {}
+    for table, raw in tables.items():
+        if not table.startswith("model_providers."):
+            continue
+        name = table[len("model_providers."):]
+        block = {key: _value(value) for key, value in raw.items()}
+        if name.endswith(".auth"):
+            providers.setdefault(name[:-5], {})["auth"] = block
+        else:
+            providers.setdefault(name, {}).update(block)
+    settings["model_providers"] = providers
+    return settings
+
+
+def config_provider(name, settings=None, include_key=True):
+    """读取指定 provider；显式换 key 时只读取地址，不运行旧鉴权命令。"""
+    settings = provider_settings() if settings is None else settings
+    block = settings.get("model_providers", {}).get(name)
     if not block:
         raise ValueError("config.toml 里没有 model_providers.%s；请确认 provider 名字。" % name)
     url = block.get("base_url")
     if not isinstance(url, str) or not url.strip():
         raise ValueError("model_providers.%s 没有 base_url，无法直接复用。" % name)
     connection = {"url": normalize_url(url), "provider": name}
+    if not include_key:
+        return connection
+    auth = block.get("auth")
     auth = auth if isinstance(auth, dict) else {}
     command = auth.get("command")
     if isinstance(command, str) and command.strip():
@@ -435,6 +453,38 @@ def config_provider(name):
         return connection
     raise ValueError("model_providers.%s 没有 auth 命令、experimental_bearer_token 或可用的 env_key；"
                      "请改用 --url 与密钥。" % name)
+
+
+def existing_config_connection(url=None, include_key=True):
+    """Only discover the active provider or providers matching the requested URL."""
+    settings = provider_settings()
+    providers = settings.get("model_providers", {})
+    active = settings.get("model_provider")
+    names = [active] if isinstance(active, str) and active in providers else []
+    if url is not None:
+        names.extend(name for name in providers if name not in names)
+    for name in names:
+        block = providers[name]
+        base = block.get("base_url")
+        if not isinstance(base, str) or not base.strip():
+            continue
+        try:
+            candidate_url = normalize_url(base)
+        except ValueError:
+            if url is None:
+                raise
+            continue
+        if url is not None and candidate_url != url:
+            continue
+        auth = block.get("auth")
+        auth = auth if isinstance(auth, dict) else {}
+        token = block.get("experimental_bearer_token")
+        env_name = block.get("env_key")
+        if (not include_key or auth.get("command")
+                or isinstance(token, str) and token.strip()
+                or isinstance(env_name, str) and os.environ.get(env_name, "").strip()):
+            return config_provider(name, settings=settings, include_key=include_key)
+    return None
 
 
 def run_auth_command(target, options=None):
@@ -477,31 +527,46 @@ def configure(arguments, binary=None, direct=None, catalog_loader=None, persist=
     args = parser.parse_args(arguments)
     binary = binary or codex_binary()
     saved = saved_connection()
+    explicit_key = os.environ.get("CODEX_PROVIDER_API_KEY", "").strip()
+    reuse_key = not args.reconfigure and not explicit_key
+    saved_auth = saved and (saved.get("api_key") or saved.get("auth_command"))
+    cached = False
     if args.provider:
-        connection = config_provider(args.provider)
+        connection = config_provider(args.provider, include_key=reuse_key)
         print("使用 config.toml 里的 model_providers.%s。" % args.provider, file=sys.stderr)
     elif args.url:
         url = normalize_url(args.url)
-        key = os.environ.get("CODEX_PROVIDER_API_KEY")
-        if not key and not args.reconfigure and saved and saved.get("url") == url and saved.get("api_key"):
-            key = saved["api_key"]              # 地址没变就沿用，不重复输入
-            print("地址与已保存连接一致，沿用原密钥。", file=sys.stderr)
-        if not key:
-            key = prompt_key()
-        if not key or not key.strip():
-            raise ValueError("API key 不能为空。")
-        connection = {"url": url, "api_key": key.strip()}
-    elif saved and saved.get("api_key") and not args.reconfigure:
+        connection = {"url": url}
+        if reuse_key:
+            if saved_auth and saved.get("url") and normalize_url(saved["url"]) == url:
+                connection = dict(saved, url=url)
+                cached = True
+            else:
+                connection = existing_config_connection(url) or connection
+    elif not args.reconfigure and saved and saved.get("url") and (saved_auth or explicit_key):
         connection = dict(saved)
-        print("沿用已保存的连接%s（换地址用 --url 或 --provider，强制重来加 --reconfigure）。"
-              % ("：" + connection.get("provider", connection["url"]) if connection.get("provider") else "：" + connection["url"]),
-              file=sys.stderr)
+        cached = True
+    elif not args.reconfigure:
+        connection = existing_config_connection(include_key=reuse_key)
+        if connection is None:
+            connection = {"url": normalize_url(prompt_url())}
     else:
-        url = normalize_url(prompt_url())
-        key = prompt_key()
-        if not key or not key.strip():
-            raise ValueError("API key 不能为空。")
-        connection = {"url": url, "api_key": key.strip()}
+        connection = {"url": normalize_url(prompt_url())}
+    if explicit_key or args.reconfigure:
+        key = explicit_key or prompt_key()
+        connection.pop("auth_command", None)
+        connection.pop("auth_options", None)
+    elif cached:
+        key = resolved_key(connection)
+    else:
+        key = connection.get("api_key") or prompt_key()
+    if not key or not key.strip():
+        raise ValueError("API key 不能为空。")
+    connection["api_key"] = key.strip()
+    if cached:
+        print("沿用已保存的连接与现有凭据。", file=sys.stderr)
+    elif connection.get("provider"):
+        print("复用现有 Codex provider：%s。" % connection["provider"], file=sys.stderr)
     if direct is not None:
         connection["direct"] = direct
     elif saved and saved.get("url") == connection["url"] and "direct" in saved:

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 main() {
-    local release="${CODEX_CONNECT_REF:-v0.1.8}"
+    local release="${CODEX_CONNECT_REF:-v0.1.9}"
     local base="https://github.com/Molaison/codex-provider-connect/releases/download/${release}"
     # Preserve explicit ref overrides, including older releases without assets.
     if [[ -n "${CODEX_CONNECT_REF:-}" ]]; then
@@ -40,8 +40,9 @@ main() {
     temporary=$(mktemp -d "${root}/.installer.XXXXXX")
     trap 'rm -rf -- "${temporary:-}"' EXIT
     printf '正在安装、更新或修复 %s；沿用已保存的连接。\n' "$release" >&2
-    curl --fail --silent --show-error --location --retry 2 "${base}/codex_provider.py" -o "$temporary/codex_provider.py"
-    curl --fail --silent --show-error --location --retry 2 "${base}/model_catalog.json" -o "$temporary/model_catalog.json"
+    # Some proxy paths advertise HTTP/2 but fail release-asset streams (curl 92).
+    curl --http1.1 --fail --silent --show-error --location --retry 2 "${base}/codex_provider.py" -o "$temporary/codex_provider.py"
+    curl --http1.1 --fail --silent --show-error --location --retry 2 "${base}/model_catalog.json" -o "$temporary/model_catalog.json"
     if [[ "$release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
        && ! grep -q "VERSION = \"${release#v}\"" "$temporary/codex_provider.py"; then
         printf '下载的安装助手与 %s 不一致；未覆盖现有文件。\n' "$release" >&2

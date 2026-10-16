@@ -2,6 +2,16 @@
 
 本页保留 README 精简前的操作细节、限制说明、卸载步骤和历史验收记录。
 
+## v0.1.9：可靠下载，默认复用现有 key
+
+v0.1.8 发布后的实际分发检查发现，h100 的默认 curl 下载助手时返回 92（HTTP/2 流错误）；沿相同代理改用 HTTP/1.1 后，助手和目录均 HTTP 200。Shell 入口及其两次载荷下载因此统一指定 `--http1.1`，不关闭 TLS、不改代理、不用另一来源兜底。版本一致性、下载失败保留旧文件、已有 server 重载和真实工具自检语义保持不变。
+
+TY 的另一故障是已停止的 `127.0.0.1:18901` 代理拒绝连接，与 HTTP/2 不同。安装器不擅自扩大 `NO_PROXY`；需恢复代理，或取得用户对 GitHub 下载域名直连的明确授权。
+
+默认连接发现先沿用 connect 已保存的连接；没有保存连接时读取 config.toml 当前 model_provider。支持 bearer token、env_key 和 auth.command。显式 --url 只匹配同地址的已保存连接或 provider，不会跨地址复用密钥。保留命令式鉴权及其 cwd/超时设置，每次获取最新 key；Python 3.8–3.10 的兼容解析保留数字超时类型。显式环境 key 优先，--reconfigure 不执行旧鉴权而重新输入。新回归覆盖首次接入、地址匹配、动态 key 刷新、跨地址隔离和强制换 key。
+
+37 项相关回归通过。f102 隔离 HOME 首次从官方 npm 下载原版 0.162.1，仅带入现有 provider 配置；未传 key、URL 或 provider 参数，自动复用 auth.command 并以 GPT-6 tools temporary 完成真实只读工具调用，返回 READY / exit 0。该实装使用本地候选载荷；正式附件的分发另行核对，不重复提交已成功模型回合。没有改动真实 HOME、原 Codex 入口、服务或代理；不将此 Linux 结果扩大为 Windows/macOS 实机验收。
+
 ## v0.1.8：固定入口安装、更新和修复
 
 用户入口为 `https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh`，Windows 对应 `install.ps1`。GitHub 选择最新正式 release；脚本自身携带该版本号，助手和 `model_catalog.json` 从同一 release 的附件下载，不执行主分支代码、不临时拼出下一版本。用户每次重新下载执行，无须修改版本号。下载不完整或助手版本不符时，保留已安装的助手和目录，返回失败。

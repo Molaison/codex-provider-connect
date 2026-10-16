@@ -216,6 +216,8 @@ args = ["{token}"]
         self.env = mock.patch.dict(os.environ, {"CODEX_HOME": self.home})
         self.env.start()
         self.addCleanup(self.env.stop)
+        for name in ("CODEX_PROVIDER_URL", "CODEX_PROVIDER_API_KEY", "CODEX_PROVIDER_NAME"):
+            os.environ.pop(name, None)
         self.addCleanup(os.environ.pop, "CODEX_PROVIDER_URL", None)
         self.addCleanup(os.environ.pop, "CODEX_PROVIDER_API_KEY", None)
         self.addCleanup(os.environ.pop, "CODEX_PROVIDER_NAME", None)
@@ -306,6 +308,121 @@ experimental_bearer_token = "sk-bearer"
         stored = json.loads((self.state() / "connection.json").read_text(encoding="utf-8"))
         self.assertEqual(stored, {"url": "https://example.test/v1", "provider": "tok",
                                   "api_key": "sk-bearer"})
+
+    def test_default_install_reuses_active_provider_without_saved_connection(self):
+        token = self.token_file("sk-existing-command")
+        text = self.AUTH_CONFIG.format(token=token)
+        self.write_config(text)
+        with mock.patch.object(connector, "prompt_url", side_effect=AssertionError("unexpected URL prompt")), \
+                mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure([])
+        self.assertEqual(connection["api_key"], "sk-existing-command")
+        self.assertEqual(connection["provider"], "ywl")
+        self.assertEqual((Path(self.home) / "config.toml").read_text(), text)
+
+    def test_explicit_url_reuses_matching_configured_provider(self):
+        self.write_config('model_provider = "tok"\n[model_providers.tok]\n'
+                          'base_url = "https://example.test/v1/"\n'
+                          'experimental_bearer_token = "sk-existing"\n')
+        with mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure(["--url", "https://example.test/v1"])
+        self.assertEqual(connection["api_key"], "sk-existing")
+
+    def test_saved_auth_command_is_refreshed_when_url_is_explicit(self):
+        token = self.token_file("sk-refreshed")
+        connector.private_json(self.state() / "connection.json", {
+            "url": "https://example.test/v1", "api_key": "sk-stale",
+            "auth_command": ["/bin/cat", str(token)],
+            "auth_options": {"cwd": self.home, "timeout_ms": 5000}})
+        with mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure(["--url", "https://example.test/v1"])
+        self.assertEqual(connection["api_key"], "sk-refreshed")
+        self.assertEqual(connection["auth_command"], ["/bin/cat", str(token)])
+        self.assertEqual(connection["auth_options"]["cwd"], self.home)
+
+    def test_saved_auth_command_without_cached_key_is_reused(self):
+        token = self.token_file("sk-command-only")
+        connector.private_json(self.state() / "connection.json", {
+            "url": "https://example.test/v1", "auth_command": ["/bin/cat", str(token)]})
+        with mock.patch.object(connector, "prompt_url", side_effect=AssertionError("unexpected URL prompt")), \
+                mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure([])
+        self.assertEqual(connection["api_key"], "sk-command-only")
+
+    def test_different_url_never_reuses_existing_credentials(self):
+        token = self.token_file("sk-private-original")
+        self.write_config(self.AUTH_CONFIG.format(token=token))
+        connector.private_json(self.state() / "connection.json", {
+            "url": "http://192.168.233.231:18082/v1", "api_key": "sk-private-original"})
+        with mock.patch.object(connector, "prompt_key", return_value="sk-new") as prompt, \
+                mock.patch.object(connector, "run_auth_command", side_effect=AssertionError("cross-origin auth")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure(["--url", "https://different.test/v1"])
+        prompt.assert_called_once_with()
+        self.assertEqual(connection["api_key"], "sk-new")
+        self.assertNotIn("auth_command", connection)
+
+    def test_reconfigure_keeps_explicit_provider_url_but_requests_new_key(self):
+        token = self.token_file("sk-old")
+        self.write_config(self.AUTH_CONFIG.format(token=token))
+        with mock.patch.object(connector, "prompt_url", side_effect=AssertionError("explicit provider has URL")), \
+                mock.patch.object(connector, "prompt_key", return_value="sk-replaced") as prompt, \
+                mock.patch.object(connector, "run_auth_command", side_effect=AssertionError("must not run old auth")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure(["--provider", "ywl", "--reconfigure"])
+        prompt.assert_called_once_with()
+        self.assertEqual(connection["api_key"], "sk-replaced")
+        self.assertNotIn("auth_command", connection)
+
+    def test_explicit_environment_key_overrides_active_auth_without_executing_it(self):
+        token = self.token_file("sk-old")
+        self.write_config(self.AUTH_CONFIG.format(token=token))
+        with mock.patch.dict(os.environ, {"CODEX_PROVIDER_API_KEY": "sk-explicit"}), \
+                mock.patch.object(connector, "prompt_url", side_effect=AssertionError("unexpected URL prompt")), \
+                mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "run_auth_command", side_effect=AssertionError("must not run old auth")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure([])
+        self.assertEqual(connection["api_key"], "sk-explicit")
+        self.assertNotIn("auth_command", connection)
+
+    def test_default_auth_options_keep_numeric_types_without_tomllib(self):
+        token = self.token_file("sk-auth-options")
+        text = self.AUTH_CONFIG.format(token=token)
+        text += 'timeout_ms = 5000\nrefresh_interval_ms = 300000\ncwd = ' + json.dumps(self.home) + '\n'
+        self.write_config(text)
+        with mock.patch.object(connector, "tomllib", None), \
+                mock.patch.object(connector, "prompt_url", side_effect=AssertionError("unexpected URL prompt")), \
+                mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure([])
+        self.assertEqual(connection["api_key"], "sk-auth-options")
+        self.assertEqual(connection["auth_options"]["timeout_ms"], 5000)
+        self.assertEqual(connection["auth_options"]["refresh_interval_ms"], 300000)
+
+    def test_default_provider_discovery_works_without_tomllib(self):
+        self.write_config('model_provider = "tok"\n[model_providers.tok]\n'
+                          'base_url = "https://example.test/v1"\n'
+                          'experimental_bearer_token = "sk-fallback-default"\n')
+        with mock.patch.object(connector, "tomllib", None), \
+                mock.patch.object(connector, "prompt_url", side_effect=AssertionError("unexpected URL prompt")), \
+                mock.patch.object(connector, "prompt_key", side_effect=AssertionError("unexpected key prompt")), \
+                mock.patch.object(connector, "fetch_catalog"), \
+                mock.patch.object(connector, "codex_binary", return_value=["/bin/true"]):
+            connection, _ = connector.configure([])
+        self.assertEqual(connection["api_key"], "sk-fallback-default")
 
 
 class ClientOverrideTests(unittest.TestCase):

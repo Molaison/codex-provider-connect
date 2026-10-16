@@ -1,18 +1,22 @@
 # Codex Provider Connect
 
-**给一个 API 地址和 key，配置现有的 `codex`，并验证一次真实工具调用。** 使用官方原版客户端，不打补丁，不新增日常 CLI。
+**默认复用已有 API 地址和 key，配置原生 `codex`，并验证一次真实工具调用。** 使用官方原版客户端，不打补丁，不新增日常 CLI。
 
 ## 安装后直接用 `codex`
 
 使用这个**固定入口**，无需克隆仓库或填写版本号：
 
 ```bash
-(set -o pipefail; curl -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash -s -- --url https://your-provider.example/v1)
+(set -o pipefail; curl --http1.1 -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash)
 ```
 
-将地址替换为维护者提供的 endpoint，按提示隐藏输入自己的 key。不要把 key 写进命令行。
+默认沿用本工具保存的连接；首次接入时，自动读取现有 config.toml 的当前 provider，复用其 key、env_key 或 auth.command。没有可用连接才询问地址和 key，不再要求重复输入。命令式鉴权每次重新取 key，不使用过期缓存。
+
+新用户也可显式加 --url 指定维护者提供的 endpoint。指定地址时，只复用同地址的凭据，绝不把旧服务的 key 发到另一地址。自动化显式提供的 CODEX_PROVIDER_API_KEY 优先；--reconfigure 强制重新输入。不要把 key 写进命令行。
 
 入口始终选择最新正式发布版。每次安装的助手和目录都锁定在同一发布包，不混用不同版本；下载失败不会覆盖已有助手和目录。命令中的 `pipefail` 让入口下载失败也返回非零，避免空下载被误当成安装成功。
+
+下载使用 HTTP/1.1，兼容 HTTP/2 流不稳定的代理；仍使用原代理和 TLS 校验。GitHub 下载需能访问 `github.com` 和 `release-assets.githubusercontent.com`。若原代理已停止，先恢复它或由用户明确允许这些域名直连，再重跑；安装器不会擅改代理。
 
 安装器会准备固定版本的**官方 Codex 0.162.1**，检查地址和密钥权限，写入原生配置，再用只读工具读取随机文件并核对完整回答。无需先装 Codex、npm 或手动编辑 TOML。
 
@@ -43,7 +47,7 @@ Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限�
 安装、更新模型和修复都重跑同一个入口，**不用改版本号，也不用加参数**：
 
 ```bash
-(set -o pipefail; curl -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash)
+(set -o pipefail; curl --http1.1 -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash)
 ```
 
 沿用已保存的 endpoint/key，取得最新正式发布包，修复本工具拥有的官方副本、`codex` 入口和模型目录。连接或目录变化时执行新的真实自检；失败终态会在这次重跑时重新自检，原失败记录保留。自检仍在进行时只返回原回合状态，不重复提交；结束后再重跑完成更新。入口或私有助手损坏也用这一命令恢复。
@@ -53,7 +57,7 @@ Linux/macOS/WSL 安装入口需要 Python 3.8+ 和 curl，无需管理员权限�
 换地址或 key 时：
 
 ```bash
-(set -o pipefail; curl -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash -s -- --reconfigure)
+(set -o pipefail; curl --http1.1 -fsSL --retry 2 https://github.com/Molaison/codex-provider-connect/releases/latest/download/install.sh | bash -s -- --reconfigure)
 ```
 
 模型目录由维护者直接维护在安装包的 `model_catalog.json`，通过官方 `model_catalog_json` 加载。**不依赖上游同步元数据，也不在每次启动时联网刷新目录。** 维护者发布新版后，重跑上面的固定入口就能更新。目录更新采用新文件路径；已有 server 必须完成上述重载，即使模型 ID 没变、只有能力或文案改变。保留旧版安装器只用于回退，不要用旧本地脚本代替固定下载入口。

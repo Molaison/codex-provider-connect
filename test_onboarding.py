@@ -520,7 +520,8 @@ class ReleaseBootstrapTests(unittest.TestCase):
         self.env = {"HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex"),
                     "PATH": os.environ.get("PATH", os.defpath), "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
         self.latest = "v" + connector.VERSION
-        self.future = "v0.1.9"
+        major, minor, patch = connector.VERSION.split(".")
+        self.future = "v%s.%s.%s" % (major, minor, int(patch) + 1)
         self.requests = []
         self.missing_catalog = False
         self.mismatch = False
@@ -566,7 +567,7 @@ class ReleaseBootstrapTests(unittest.TestCase):
     def install(self):
         # This command is identical before/after a new release. No ref override.
         return subprocess.run(["bash", "-o", "pipefail", "-c",
-            'curl -fsSL "$1/releases/latest/download/install.sh" | bash', "fixture", self.base],
+            'curl --http1.1 -fsSL "$1/releases/latest/download/install.sh" | bash', "fixture", self.base],
             env=self.env, capture_output=True, text=True, timeout=20)
 
     def test_same_latest_url_updates_without_mixing_releases_when_latest_changes_mid_download(self):
@@ -576,12 +577,35 @@ class ReleaseBootstrapTests(unittest.TestCase):
         self.assertIn('VERSION = "' + connector.VERSION + '"', (self.root / "codex_provider.py").read_text())
         updated = self.install()
         self.assertEqual(updated.returncode, 0, updated.stderr)
-        self.assertIn('VERSION = "0.1.9"', (self.root / "codex_provider.py").read_text())
+        self.assertIn('VERSION = "' + self.future[1:] + '"', (self.root / "codex_provider.py").read_text())
         self.assertEqual(self.requests, ["/releases/latest/download/install.sh",
             "/releases/download/v" + connector.VERSION + "/codex_provider.py",
             "/releases/download/v" + connector.VERSION + "/model_catalog.json",
-            "/releases/latest/download/install.sh", "/releases/download/v0.1.9/codex_provider.py",
-            "/releases/download/v0.1.9/model_catalog.json"])
+            "/releases/latest/download/install.sh", "/releases/download/" + self.future + "/codex_provider.py",
+            "/releases/download/" + self.future + "/model_catalog.json"])
+
+    def test_entry_and_payload_downloads_avoid_broken_http2_streams(self):
+        shim = self.home / "bin"
+        shim.mkdir()
+        calls = self.home / "curl-calls.jsonl"
+        curl = shim / "curl"
+        curl.write_text('''#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+with Path(%r).open("a") as output:output.write(json.dumps(sys.argv[1:]) + "\\n")
+if "--http1.1" not in sys.argv:
+    sys.stderr.write("curl: (92) simulated broken HTTP/2 stream\\n")
+    sys.exit(92)
+os.execv(%r, [%r] + sys.argv[1:])
+''' % (str(calls), shutil.which("curl"), shutil.which("curl")))
+        curl.chmod(0o700)
+        self.env["PATH"] = str(shim) + os.pathsep + self.env["PATH"]
+        installed = self.install()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        arguments = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(len(arguments), 3)
+        self.assertTrue(all("--http1.1" in call for call in arguments))
+        self.assertIn("[READY]", installed.stdout)
 
     def test_missing_payload_or_version_mismatch_never_replaces_working_installation(self):
         self.assertEqual(self.install().returncode, 0)
@@ -612,7 +636,7 @@ class ReleaseBootstrapTests(unittest.TestCase):
         self.assertEqual(backups[0].read_bytes(), b"")
 
     def test_failed_latest_download_is_not_success(self):
-        result = subprocess.run(["bash", "-o", "pipefail", "-c", 'curl -fsSL "$1/missing" | bash', "fixture", self.base],
+        result = subprocess.run(["bash", "-o", "pipefail", "-c", 'curl --http1.1 -fsSL "$1/missing" | bash', "fixture", self.base],
                                 env=self.env, capture_output=True, text=True, timeout=15)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("[READY]", result.stdout)
